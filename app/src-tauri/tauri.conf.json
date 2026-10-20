@@ -1,44 +1,41 @@
 {
+  "$schema": "https://schema.tauri.app/config/2",
   "productName": "Latent",
   "version": "0.1.0",
   "identifier": "com.mazon.latent",
   "build": {
-    "beforeBuildCommand": "echo Done",
     "frontendDist": "../ui"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
-        "label": "main",
         "title": "Latent",
-        "width": 1280,
-        "height": 860,
+        "width": 1440,
+        "height": 900,
         "minWidth": 960,
-        "minHeight": 640,
-        "resizable": true,
-        "fullscreen": false,
-        "transparent": false,
-        "decorations": true
+        "minHeight": 600,
+        "backgroundColor": "#111213"
       }
     ],
-    "withGlobalTauri": true,
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; connect-src 'self' http://localhost:https:;"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/**", "$APPLOCALDATA/**"]
+      }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "deb", "rpm", "appimage"],
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png"
-    ],
-    "resources": ["../ui/fonts"]
-  },
-  "plugins": {
-    "http": {
-      "allOrigins": false
+    "targets": ["nsis"],
+    "category": "Photography",
+    "shortDescription": "Local image generation and editing",
+    "longDescription": "Write a prompt or drop in a photo, and watch the image develop. Runs diffusion models on your own GPU.",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
+    "resources": {
+      "../../engines/": "engines/",
+      "../../LICENSE": "LICENSE"
     }
   }
 }

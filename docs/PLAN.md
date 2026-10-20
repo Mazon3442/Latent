@@ -148,110 +148,117 @@ fastest variant that fits this PC and says so; the user can override. No "advanc
 
 ## 5. Backend contract
 
-The interface is built only against this. The backend owns everything below the line.
+The interface is built only against this, and this section matches the code (`app/src-tauri/src/main.rs`,
+`engine.rs`, `engines/diffusion_worker.py`). Change it here and there together. Status column: what exists today.
 
 ### Tauri commands (`invoke`)
 
-| Command | Args | Returns | Notes |
+| Command | Args | Returns | Status |
 | --- | --- | --- | --- |
-| `bootstrap` | | `{ version, settings, hw, models, sources, frames, resident }` | Everything the first paint needs, in one call |
-| `save_settings` | `settings` | `settings` | |
-| `models` | | `Model[]` | Catalog + install state + fit verdict for this PC |
-| `install_model` | `id, variant` | `Model` | Streams `install` events. Resumable. |
-| `remove_model` | `id` | `Model` | |
-| `preload` | `model, variant` | | Warms a model; `engine` events report state |
-| `unload` | | | |
-| `generate` | `GenRequest` | `{ batch }` | Returns at once with the batch id; results arrive as events |
-| `cancel` | `batch` | | |
-| `import_sources` | `paths?: string[]` | `Source[]` | No paths: opens the file dialog. Accepts drag-and-drop paths. |
-| `paste_source` | `png: string` (base64) | `Source` | Clipboard images |
-| `frame_to_source` | `frame` | `Source` | "Use as source" |
-| `delete_source` | `id` | | |
-| `run_tool` | `{ tool: "upscale" \| "cutout", input: { frame } \| { source }, scale? }` | `{ batch }` | Results arrive as `frame` events in their own batch |
-| `save_frame` | `id` | `path` | To the save folder, unique name |
-| `save_frame_as` | `id` | `path \| null` | Save dialog: PNG, WebP or JPEG |
-| `delete_frame` | `id` | | |
-| `reveal` | `path` | | Show in Explorer / file manager |
-| `check_update`, `install_update` | | | As in Mimic |
+| `bootstrap` | | `{ version, settings, hw, device, models, sources, frames, resident, logs, platform }` | built |
+| `save_settings` | `settings` | `Settings` | built |
+| `install_model` | `id` | `Model[]` | built. Streams `install` events; resumes an interrupted download |
+| `remove_model` | `id` | `Model[]` | built. Deletes the shared environment once no model is left |
+| `preload` | `model, variant?` | | built. `engine` events report the state |
+| `unload` | | | built |
+| `generate` | `request: GenRequest` | `{ batch }` | built. Validates, returns at once; results arrive as events |
+| `cancel` | `batch` | | built. Stops at the next step, model stays loaded; killed after 10 s if it doesn't answer |
+| `import_sources` | `paths?: string[]` | `Source[]` | built. No paths: file dialog. Also used for drag and drop |
+| `paste_source` | `png` (base64 or data URL) | `Source` | built |
+| `frame_to_source` | `frame` | `Source` | built |
+| `delete_source` | `id` | | built |
+| `save_frame` | `id` | `path` | built. PNG to the save folder, name from the prompt and seed |
+| `save_frame_as` | `id` | `path \| null` | built. PNG only for now |
+| `delete_frame` | `id` | | built |
+| `pick_folder` | `title` | `path \| null` | built |
+| `reveal` | `path` | | built |
+| `ui_error` | `message` | | built. Appends to logs/ui.log |
+| `run_tool` | `{ tool, frame \| source }` | `{ batch }` | phase 3 |
+| `check_update`, `install_update` | | | phase 4, as in Mimic |
+
+The UI refers to frames and sources by id only, so it can't point the core at arbitrary files.
 
 ### Events (`listen`)
 
 | Event | Payload |
 | --- | --- |
-| `hw` | `{ device, vram: { used, total } \| null, ram: { used, total } }` every second while the window is visible |
-| `engine` | `{ model, variant, state: "cold" \| "loading" \| "warm" \| "busy" \| "unloading" \| "crashed", elapsed?, message? }` |
-| `progress` | `{ batch, index, step, steps, preview?: path, secPerStep }` |
-| `frame` | `Frame` (a finished frame) |
+| `hw` | `{ hw: Hardware, resident, idleLeft }` every 2 s. `Hardware` is Mimic's (`gpu, vendor, accel, vramTotal, vramUsed, ramTotal, ramUsed, note, fix`, ...) |
+| `engine` | `{ model, state: "cold" \| "loading" \| "warm" \| "busy" \| "unloading", message? }` |
+| `progress` | `{ batch, index, step, steps, preview, secPerStep }` |
+| `frame` | `Frame` |
 | `batch` | `{ batch, state: "done" \| "cancelled" \| "failed", error?: { kind: "oom" \| "model" \| "input", message, fix? } }` |
-| `install` | `{ id, phase: "env" \| "torch" \| "weights" \| "verify" \| "done" \| "failed", done?, total?, message? }` |
+| `install` | `{ id, phase: "env" \| "torch" \| "packages" \| "weights" \| "done" \| "failed", label, done?, total? }` (bytes) |
+| `log`, `fallback` | a status line; a GPU the installed PyTorch can't use |
 
 ### Types
 
 ```ts
 GenRequest = {
   model: string, variant?: string,
-  prompt: string, negative?: string,       // negative only for models that declare it
+  prompt: string, negative?: string,
   sources: string[],                       // source ids; empty = text to image
-  mask?: string,                           // PNG path, white = change (phase 3)
-  width: number, height: number,           // already snapped to the model's grid by the UI
+  width: number, height: number,           // 256-2048, multiples of the model's grid
   count: number,                           // frames in the batch, 1-8
   seed: number | null,                     // null = random; frame i uses seed + i
-  options: { steps?, guidance?, sampler?, strength? }  // only keys the model declares
+  options: { steps? }                      // checked against the model's range
 }
 
-Frame = { id, batch, index, path, thumb, width, height, seed, recipe: GenRequest, model, variant,
-          elapsed, saved: string | null, createdAt }
-Source = { id, path, thumb, width, height, name, fromFrame?: string }
+Frame  = { id, batch, index, path, thumb, width, height, seed, recipe, model, variant, elapsed, saved, createdAt }
+Source = { id, path, width, height, name, fromFrame }
 
-Model = { id, name, family, license, licenseUrl, commercial: boolean,
-          can: { generate, edit, inpaint, multiRef, negative },
-          sizes: [w, h][], grid: 16 | 64,
-          options: { steps: {min,max,default}, guidance?: {...}, sampler?: string[] },
-          variants: [{ id, label, vram, ram, disk, installed, fits: "yes" | "tight" | "no" }],
-          installed: boolean, defaultVariant }
+Model  = { id, name, family, license, licenseUrl, commercial, installed,
+           can: { generate, edit, inpaint, multiRef, negative },
+           sizes: [{ aspect, width, height }], grid,
+           options: { steps: { min, max, default }, guidance: null | { min, max, default } },
+           variants: [{ id, label, vram, ram, disk, fits: "yes" | "tight" | "no" }] }
 ```
 
-Frames carry their full recipe, so any frame can be regenerated or varied from its row.
+`models.rs` is the only place model facts live. `recipe` is the request with that frame's seed, so any frame can be
+reused (`R`) or regenerated.
 
 ### Worker protocol (NDJSON, one JSON object per line)
 
-The worker is started as `python -X utf8 engines/diffusion_worker.py <model> <variant>` with `LATENT_DEVICE`,
-`HF_HOME` (inside the models folder) and `LATENT_CACHE` set. Library output goes to stderr (the log), as in Mimic's workers.
+`<models folder>/diffusion-env/python -X utf8 engines/diffusion_worker.py <family> <model folder> <offload>`, with
+`LATENT_DEVICE` and `HF_HUB_OFFLINE=1` (loading never touches the network). Library output goes to stderr, which is
+the model's log file.
 
 ```jsonc
-// worker -> core, once loaded
-{"event":"ready","model":"z-image-turbo","variant":"bf16","device":"cuda","fallback":null,"vram":12.4}
+// worker -> core, once loaded (or {"event":"error","kind","message"} and exit)
+{"event":"ready","family":"zimage","device":"cuda","fallback":null,"elapsed":41.2,"vram":0.0}
 
 // core -> worker
-{"op":"generate","id":"b3-0","prompt":"...","sources":["C:/.../src.png"],"mask":null,
- "width":1024,"height":1280,"seed":41,"options":{"steps":28,"guidance":3.5},"output":"C:/.../b3-0.png"}
-{"op":"cancel","id":"b3-0"}
+{"op":"generate","id":"b17-0","prompt":"...","negative":"","sources":[],"width":1024,"height":1024,"seed":41,
+ "options":{"steps":9},"output":"C:/.../frames/b17-0.png","recipe":{...}}
+{"op":"cancel","id":"b17-0"}
 
 // worker -> core
-{"event":"progress","id":"b3-0","step":14,"steps":28,"preview":"C:/.../b3-0.p.jpg","sec_per_step":1.9}
-{"event":"done","id":"b3-0","output":"C:/.../b3-0.png","seed":41,"elapsed":53.2}
-{"event":"cancelled","id":"b3-0"}
-{"event":"error","id":"b3-0","kind":"oom","message":"CUDA out of memory (tried 2.1 GB)"}
+{"event":"progress","id":"b17-0","step":4,"steps":9,"preview":"C:/.../b17-0.png.p.jpg","sec_per_step":1.3}
+{"event":"done","id":"b17-0","output":"...png","thumb":"...png.t.jpg","seed":41,"elapsed":14.2,"peak_vram":12.9}
+{"event":"cancelled","id":"b17-0"}
+{"event":"error","id":"b17-0","kind":"oom","message":"CUDA out of memory..."}
 ```
 
-- The worker reads stdin on its own thread, so `cancel` lands mid-run; the step callback sets the pipeline's interrupt flag.
-- One request at a time. The core queues a batch's frames and sends the next one when `done` arrives.
-- Mimic's `Worker::request` waits for `done` and drops everything else. Latent needs `request_stream(req, on_event)`
-  that forwards `progress` to the UI, and the child's stdin behind its own lock so `cancel` can be written during a request.
-- The worker writes PNGs with the recipe in a `parameters` text chunk and `Software: Latent` plus an
-  `ai_generated: true` marker. Save keeps that metadata; WebP and JPEG get it as XMP.
+- Previews: at load the worker fits a linear map from latent channels to RGB on the model's own VAE (it encodes a few
+  colour fields and solves least squares), then projects each step's latents through it. No VAE decode per step and no
+  per-model constants.
+- Cancel: the worker reads stdin on its own thread; the step callback raises, so the run stops at once without
+  decoding a half-finished image. The model stays loaded.
+- One request at a time. `Worker::stream` forwards `progress` and returns the final event; the child's stdin sits
+  behind its own lock so the core can write `cancel` while a request runs.
+- PNGs carry the recipe in a `parameters` text chunk, plus `Software: Latent` and `ai_generated: true`. Saving copies
+  the file, so the marks survive.
 
 ### Data
 
 | | Windows | Linux |
 | --- | --- | --- |
-| Models folder (env, weights, `HF_HOME`) | `%USERPROFILE%\latent` | `~/.local/share/latent/models` |
-| Settings, sources, frame index | `%APPDATA%\com.mazon.latent` | `~/.local/share/com.mazon.latent` |
-| Frame cache (cleared on close) | `%LOCALAPPDATA%\com.mazon.latent\cache` | `~/.cache/latent` |
-| Save folder (default) | `Pictures\Latent` | `~/Pictures/Latent` |
+| Models folder: `diffusion-env/`, `models/<name>/` (plain files, no symlinks) | `%USERPROFILE%\latent` | `~/.local/share/latent/models` |
+| Settings, sources | `%APPDATA%\com.mazon.latent` | `~/.local/share/com.mazon.latent` |
+| Frames (cleared on start and close), logs | `%LOCALAPPDATA%\com.mazon.latent` | `~/.local/share/com.mazon.latent` |
+| Save folder (default) | `Pictures\Latent` | XDG Pictures folder `/Latent` |
 
-Sources are copied in on import (so moving the original doesn't break a recipe) and resized to at most 2048 px on the
-long side. `.gitignore` keeps generated images, sources, models and logs out of the repo.
+Sources are copied in on import (so moving the original doesn't break a recipe) and scaled to at most 2048 px on the
+long side.
 
 ## 6. Models
 
@@ -306,7 +313,7 @@ which needs PyTorch built for CUDA 12.8 or newer (Mimic's installer already pick
 ## 9. Phases
 
 **Phase 0: mockup and spike (go / no-go).**
-- `design/mockup.html`: the main screen in both themes, with real images, every state in section 8 reachable from a debug menu. Settles type, density and the contact sheet before real code.
+- ~~`design/mockup.html`~~: skipped. The real interface was built directly against the working backend instead.
 - Spike: Tauri window + `diffusion_worker.py` running Z-Image Turbo and klein 4B with step previews and cancel.
 - Measure on the 5070 Ti and on the CPU: load time, seconds per step, peak VRAM/RAM per variant, preview cost.
 - Gate: the first preview appears within 2 s of pressing Generate on a warm model.
@@ -323,7 +330,8 @@ which needs PyTorch built for CUDA 12.8 or newer (Mimic's installer already pick
 - **Interface, design, README, brand** (this side): `app/ui`, `design/`, `docs/`.
 - **Backend** (the other agent): `app/src-tauri` and `engines/`, against section 5. Start from Mimic's `worker.rs`, `hw.rs`,
   `install.rs` and `store.rs`, then add `request_stream`, the cancel path, the frame cache and thumbnails.
-- Until the backend lands, `app/ui` runs against a fake backend (`app/ui/dev/mock.js`) that implements section 5 with canned images and timed `progress` events, so the two sides never block each other.
+- 2026-10-20: the first backend attempt (local Qwen agent) didn't compile and faked installs and generation. It was
+  replaced by a core built from Mimic's modules; see git history. Backend work goes against section 5 as written.
 
 ## 10. Risks
 

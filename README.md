@@ -77,9 +77,9 @@ Latent will also need **[uv](https://docs.astral.sh/uv/)** to set up the models 
 ```text
 app/ui/                 interface (HTML, CSS, JS; fonts bundled)
 app/src-tauri/          Rust core: model manager, installer, hardware, sources and frames
-engines/                Python workers: diffusion models and tools
-design/                 the clickable design mockup, and brand.py, which draws the logo and charts
-docs/                   the plan and README assets
+engines/                the Python worker that runs the diffusion models
+design/brand.py         draws the logo, banners and charts in docs/assets
+docs/                   the plan (docs/PLAN.md) and README assets
 ```
 
 </details>

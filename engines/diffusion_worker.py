@@ -1,286 +1,194 @@
-"""Latent diffusion worker — reads NDJSON commands from stdin, writes NDJSON responses to stdout.
+"""Diffusion worker for Latent. Run with diffusion-env python (-X utf8). Speaks JSON lines on stdin/stdout.
 
-Usage:
-    python diffusion_worker.py <model_id> <variant_id> <models_folder> <compute_target>
-
-Protocol: see docs/PLAN.md §5 (worker protocol).
-One request at a time. The core sends a generate command, the worker streams
-progress events, then sends done/cancelled/error.
-
-Dependencies (pip install):
-    torch>=2.1
-    diffusers>=0.27
-    transformers
-    accelerate
-    safetensors
-    PIL
+Start args: <family> <model folder> <offload: none | model>
+Requests, one at a time (docs/PLAN.md section 5):
+  {"op": "generate", "id", "prompt", "negative"?, "sources": [paths], "width", "height", "seed",
+   "options": {"steps"?, "guidance"?}, "output", "recipe"}
+  {"op": "cancel", "id"}      may arrive while a generate runs; stops it at the next step, model stays loaded
+Events: ready, progress, done, cancelled, error.
 """
-
-import sys
 import json
-import os
-import time
+import queue
+import sys
 import threading
-import hashlib
-from pathlib import Path
+import time
 
-try:
-    from PIL import Image
-    import numpy as np
-except ImportError:
-    # Pillow and numpy are optional — worker degrades gracefully
-    Image = None
-    np = None
+real_out = sys.stdout
+sys.stdout = sys.stderr  # library prints must not corrupt the protocol stream
+sys.stdin.reconfigure(encoding="utf-8")
 
+import torch
+from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 
-# ── Globals ────────────────────────────────────────────────────────
+from device import pick
 
-model_id = sys.argv[1] if len(sys.argv) > 1 else ""
-variant_id = sys.argv[2] if len(sys.argv) > 2 else ""
-models_folder = sys.argv[3] if len(sys.argv) > 3 else ""
-compute_target = sys.argv[4] if len(sys.argv) > 4 else "auto"
+FAMILY = sys.argv[1]
+FOLDER = sys.argv[2]
+OFFLOAD = sys.argv[3] if len(sys.argv) > 3 else "none"
+GIB = 1024 ** 3
 
-pipeline = None
-scheduler = None
-tokenizer = None
-text_encoder = None
-unet = None
-vae = None
-device = None
-is_closing = False
-current_cancel_id = None
-_lock = threading.Lock()
+_out = threading.Lock()
 
 
-def send(obj: dict):
-    """Write a JSON line to stdout (NDJSON protocol)."""
-    line = json.dumps(obj, separators=(",", ":"))
-    print(line, flush=True)
+def send(**message):
+    with _out:
+        real_out.write(json.dumps(message) + "\n")
+        real_out.flush()
 
 
-def get_device():
-    """Determine compute device."""
-    if compute_target == "cpu":
-        return "cpu"
-
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return "cuda"
-    except ImportError:
-        pass
-
-    # Try DirectML (Windows)
-    try:
-        import torch
-        if hasattr(torch, "backends") and hasattr(torch.backends, "directml"):
-            import torch.backends.dml
-            return "dml"
-    except (ImportError, AttributeError):
-        pass
-
-    return "cpu"
+class Cancelled(Exception):
+    pass
 
 
-def load_pipeline(model_id: str, variant_id: str, device: str):
-    """Load the appropriate diffusers pipeline for the model."""
-    global pipeline, scheduler, tokenizer, text_encoder, unet, vae, device
-
-    device = device
-    models_dir = Path(models_folder)
-    model_path = models_dir / model_id
-
-    if not model_path.exists():
-        # Try HuggingFace hub
-        model_path = model_id
-
-    send({
-        "event": "ready",
-        "model": model_id,
-        "variant": variant_id,
-        "device": device,
-        "fallback": None,
-        "vram": 0.0,  # Will be updated after first generate
-    })
+def load(device):
+    dtype = torch.bfloat16 if device != "cpu" else torch.float32  # bfloat16 is slow or unsupported on most CPUs
+    if FAMILY == "zimage":
+        from diffusers import ZImagePipeline
+        pipe = ZImagePipeline.from_pretrained(FOLDER, torch_dtype=dtype)
+    else:
+        raise ValueError(f"unknown model family {FAMILY}")
+    if device != "cpu" and OFFLOAD == "model":
+        # Each component moves to the GPU only while it runs: the text encoder, then the transformer, then the VAE.
+        pipe.enable_model_cpu_offload(device=device)
+    else:
+        pipe.to(device)
+    pipe.set_progress_bar_config(disable=True)
+    return pipe
 
 
-def generate_image(params: dict) -> dict:
-    """Generate a single image from parameters. Returns output path and metadata."""
-    global pipeline, current_cancel_id
+def fit_preview(vae, device):
+    """Least-squares map from model-space latent channels to RGB, fitted on this VAE.
 
-    batch_id = params["id"]
-    prompt = params["prompt"]
-    width = params.get("width", 512)
-    height = params.get("height", 512)
-    seed = params.get("seed", -1)
-    output_path = params["output"]
-    options = params.get("options", {})
-
-    steps = options.get("steps", 8)
-    guidance = options.get("guidance", 4.5)
-    sampler = options.get("sampler", None)
-
-    current_cancel_id = batch_id
-
-    # Setup scheduler
-    if scheduler:
-        scheduler.set_timesteps(steps)
-
-    # Generate
-    try:
-        import torch
-        generator = torch.Generator(device=device).manual_seed(seed) if seed >= 0 else None
-
-        # Use pipeline if available
-        if pipeline is not None:
-            result = pipeline(
-                prompt=prompt,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                guidance_scale=guidance,
-                generator=generator,
-            )
-            image = result.images[0]
-        else:
-            # Fallback: create a blank image
-            if Image:
-                image = Image.new("RGB", (width, height), (0, 0, 0))
-            else:
-                image = None
-
-        # Save output
-        if image and output_path:
-            image.save(output_path, format="PNG")
-            # Write seed as text sidecar for recipe extraction
-            seed_path = output_path + ".seed"
-            with open(seed_path, "w") as f:
-                f.write(str(seed))
-
-        return {
-            "id": batch_id,
-            "output": output_path,
-            "seed": seed,
-            "elapsed": 0.0,
-        }
-
-    except Exception as e:
-        error_kind = "unknown"
-        msg = str(e)
-
-        if "out of memory" in msg.lower() or "cuda" in msg.lower() and "memory" in msg.lower():
-            error_kind = "oom"
-        elif "model" in msg.lower() or "checkpoint" in msg.lower():
-            error_kind = "model"
-        elif "shape" in msg.lower() or "size" in msg.lower():
-            error_kind = "input"
-
-        return {
-            "id": batch_id,
-            "kind": error_kind,
-            "message": msg,
-        }
+    Encodes smooth random colour fields, pairs each latent pixel with the colour it covers, and solves for weights
+    plus bias. Exact for whatever VAE the model ships, so no per-model constants.
+    """
+    g = torch.Generator().manual_seed(0)
+    coarse = torch.rand(16, 3, 4, 4, generator=g)
+    images = torch.nn.functional.interpolate(coarse, size=(128, 128), mode="bicubic", align_corners=False).clamp(0, 1)
+    # With offloading the VAE sits on the CPU and moves to `device` only while it runs, so its input goes there too.
+    with torch.no_grad():
+        z = vae.encode((images * 2 - 1).to(device, vae.dtype)).latent_dist.mean.float().cpu()
+    shift = getattr(vae.config, "shift_factor", None) or 0.0
+    z = (z - shift) * vae.config.scaling_factor  # what the transformer sees and the step callback hands us
+    colours = torch.nn.functional.interpolate(images, size=z.shape[-2:], mode="area")
+    x = z.permute(0, 2, 3, 1).reshape(-1, z.shape[1])
+    x = torch.cat([x, torch.ones(x.shape[0], 1)], dim=1)
+    y = colours.permute(0, 2, 3, 1).reshape(-1, 3)
+    return torch.linalg.lstsq(x, y).solution  # (channels + 1, 3)
 
 
-def read_command():
-    """Read a single NDJSON command from stdin."""
-    line = sys.stdin.readline()
-    if not line:
-        return None
-    line = line.strip()
-    if not line:
-        return None
-    try:
-        return json.loads(line)
-    except json.JSONDecodeError:
-        return None
+def write_preview(latents, projection, path):
+    z = latents[0].float().permute(1, 2, 0)  # h, w, channels
+    rgb = torch.cat([z, torch.ones(*z.shape[:2], 1, device=z.device)], dim=2) @ projection.to(z.device)
+    pixels = (rgb.clamp(0, 1) * 255).byte().cpu().numpy()
+    image = Image.fromarray(pixels)
+    image.resize((image.width * 2, image.height * 2), Image.BILINEAR).save(path, quality=80)
 
 
 def main():
-    global pipeline, scheduler, tokenizer, text_encoder, unet, vae, device
-
-    device = get_device()
-    is_closing = False
-
-    # Load pipeline
+    device, fallback = pick(torch)
+    started = time.time()
     try:
-        load_pipeline(model_id, variant_id, device)
-    except Exception as e:
-        send({
-            "event": "error",
-            "id": "init",
-            "kind": "model",
-            "message": f"Failed to load model: {e}",
-        })
-        return
+        pipe = load(device)
+        projection = fit_preview(pipe.vae, pipe._execution_device)
+    except Exception as error:  # the core shows this instead of "the model stopped"
+        kind = "oom" if isinstance(error, torch.OutOfMemoryError) else "model"
+        send(event="error", kind=kind, message=f"{type(error).__name__}: {error}".split("\n")[0])
+        raise
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    send(event="ready", family=FAMILY, device=device, fallback=fallback, elapsed=round(time.time() - started, 1),
+         vram=round(torch.cuda.memory_allocated() / GIB, 2) if device == "cuda" else 0.0)
 
-    # Command loop
-    while not is_closing:
-        try:
-            cmd = read_command()
-        except (IOError, EOFError):
-            break
+    requests = queue.Queue()
+    cancelled = set()
+    current = {"id": None}
+    stop = threading.Event()
 
-        if cmd is None:
+    def read():
+        """Own thread, so a cancel lands while a generate is running."""
+        for line in sys.stdin:
+            line = line.lstrip("﻿").strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            if r.get("op") == "cancel":
+                cancelled.add(r["id"])
+                if current["id"] == r["id"]:
+                    stop.set()
+            else:
+                requests.put(r)
+        requests.put(None)  # stdin closed: Latent is gone
+
+    threading.Thread(target=read, daemon=True).start()
+
+    while (r := requests.get()) is not None:
+        rid = r["id"]
+        if rid in cancelled:
+            send(event="cancelled", id=rid)
             continue
+        current["id"] = rid
+        stop.clear()
+        try:
+            send(**generate(pipe, projection, device, r, stop))
+        except Cancelled:
+            send(event="cancelled", id=rid)
+        except torch.OutOfMemoryError as error:
+            send(event="error", id=rid, kind="oom", message=str(error).split("\n")[0])
+        except Exception as error:  # report and keep the model loaded
+            send(event="error", id=rid, kind="model", message=f"{type(error).__name__}: {error}")
+        finally:
+            current["id"] = None
+            pipe.maybe_free_model_hooks()  # a run that stopped early leaves offload hooks mid-cycle
+            if device == "cuda":
+                torch.cuda.empty_cache()
 
-        op = cmd.get("op")
 
-        if op == "generate":
-            try:
-                # Unload command (special case)
-                if cmd.get("options", {}).get("unload"):
-                    send({
-                        "event": "done",
-                        "id": cmd["id"],
-                        "output": "",
-                        "seed": 0,
-                        "elapsed": 0,
-                    })
-                    # Clean up
-                    pipeline = None
-                    scheduler = None
-                    continue
+def generate(pipe, projection, device, r, stop):
+    if r.get("sources"):
+        raise ValueError("this model makes new images; pick a model that can edit")
+    rid = r["id"]
+    options = r.get("options") or {}
+    steps = int(options.get("steps", 9))
+    preview = r["output"] + ".p.jpg"
+    started = time.time()
+    last = [started]
 
-                result = generate_image(cmd)
+    def on_step(pipeline, i, t, tensors):
+        if stop.is_set():
+            raise Cancelled()
+        write_preview(tensors["latents"], projection, preview)
+        now = time.time()
+        send(event="progress", id=rid, step=i + 1, steps=steps, preview=preview, sec_per_step=round(now - last[0], 2))
+        last[0] = now
+        return {}
 
-                if "output" in result:
-                    send({
-                        "event": "done",
-                        **result,
-                    })
-                else:
-                    send({
-                        "event": "error",
-                        "id": result["id"],
-                        "kind": result["kind"],
-                        "message": result["message"],
-                    })
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    image = pipe(
+        prompt=r["prompt"],
+        width=int(r["width"]),
+        height=int(r["height"]),
+        num_inference_steps=steps,
+        guidance_scale=float(options.get("guidance", 0.0)),
+        generator=torch.Generator("cpu").manual_seed(int(r["seed"])),  # CPU generator: same seed, same image, offloaded or not
+        callback_on_step_end=on_step,
+        callback_on_step_end_tensor_inputs=["latents"],
+    ).images[0]
 
-            except Exception as e:
-                send({
-                    "event": "error",
-                    "id": cmd.get("id", "unknown"),
-                    "kind": "unknown",
-                    "message": str(e),
-                })
-
-        elif op == "cancel":
-            current_cancel_id = cmd["id"]
-            send({
-                "event": "cancelled",
-                "id": cmd["id"],
-            })
-
-        elif op == "close":
-            is_closing = True
-
-    # Cleanup
-    try:
-        if pipeline is not None:
-            del pipeline
-    except Exception:
-        pass
+    info = PngInfo()
+    info.add_text("parameters", json.dumps(r.get("recipe") or {}))
+    info.add_text("Software", "Latent")
+    info.add_text("ai_generated", "true")
+    image.save(r["output"], pnginfo=info)
+    thumb = r["output"] + ".t.jpg"
+    small = image.copy()
+    small.thumbnail((384, 384))
+    small.save(thumb, quality=85)
+    peak = round(torch.cuda.max_memory_allocated() / GIB, 2) if device == "cuda" else 0.0
+    return dict(event="done", id=rid, output=r["output"], thumb=thumb, seed=int(r["seed"]),
+                elapsed=round(time.time() - started, 2), peak_vram=peak)
 
 
 if __name__ == "__main__":

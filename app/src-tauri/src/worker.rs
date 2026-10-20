@@ -1,334 +1,209 @@
-/// Worker management: launch and communicate with the Python diffusion worker.
-/// The worker is a subprocess that reads NDJSON from stdin and writes NDJSON to stdout.
-/// Protocol: see docs/PLAN.md section 5 (worker protocol).
+//! A long-lived Python worker that speaks JSON lines on stdin/stdout (see engines/*.py).
 
-use serde::{Deserialize, Serialize};
-use std::io::{BufRead as _, Write as _};
-use std::process::{Child, ChildStdin, Command};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use tokio::sync::mpsc;
-use tokio::task;
+use serde_json::Value;
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EngineState {
-    Cold,
-    Loading { elapsed: f64 },
-    Warm,
-    Busy,
-    Unloading,
-    Crashed { message: String },
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// Put a child in a job object that Windows closes when Latent exits, even if Latent crashes.
+/// Everything the child starts joins the same job, so no engine can outlive the app and hold VRAM.
+#[cfg(windows)]
+pub fn adopt(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::JobObjects::*;
+    static JOB: OnceLock<usize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(
+            h,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        h as usize
+    });
+    unsafe {
+        AssignProcessToJobObject(job as _, child.as_raw_handle() as _);
+    }
 }
 
-impl std::fmt::Display for EngineState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EngineState::Cold => write!(f, "cold"),
-            EngineState::Loading { .. } => write!(f, "loading"),
-            EngineState::Warm => write!(f, "warm"),
-            EngineState::Busy => write!(f, "busy"),
-            EngineState::Unloading => write!(f, "unloading"),
-            EngineState::Crashed { message } => write!(f, "crashed: {}", message),
+/// On Linux the same guarantee comes from `hidden` (a death signal set on every child).
+#[cfg(not(windows))]
+pub fn adopt(_child: &Child) {}
+
+/// Kill a process and everything it started. A venv's python.exe on Windows is a launcher that runs
+/// the real interpreter as a child, so killing only the launcher would leave the model in VRAM.
+#[cfg(windows)]
+pub fn kill_tree(child: &mut Child) {
+    let mut cmd = Command::new("taskkill");
+    cmd.args(["/PID", &child.id().to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null());
+    hidden(&mut cmd);
+    let _ = cmd.status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// On Linux each child leads its own process group, so the whole group goes at once.
+#[cfg(unix)]
+pub fn kill_tree(child: &mut Child) {
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Every child process Latent starts goes through here.
+/// Windows: no console window. Linux: its own process group (so `kill_tree` gets its children too),
+/// and a death signal so it dies with Latent even if Latent crashes.
+pub fn hidden(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                Ok(())
+            });
         }
     }
+    cmd
 }
 
-/// Message from worker to core.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event")]
-pub enum WorkerEvent {
-    #[serde(rename = "ready")]
-    Ready { model: String, variant: String, device: String, fallback: Option<String>, vram: f64 },
-
-    #[serde(rename = "progress")]
-    Progress { id: String, step: usize, steps: usize, preview: Option<String>, sec_per_step: Option<f64> },
-
-    #[serde(rename = "done")]
-    Done { id: String, output: String, seed: i64, elapsed: f64 },
-
-    #[serde(rename = "cancelled")]
-    Cancelled { id: String },
-
-    #[serde(rename = "error")]
-    Error { id: String, kind: ErrorKind, message: String },
-
-    /// Core -> worker: set busy state (not from worker itself)
-    #[serde(rename = "busy")]
-    Busy { id: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ErrorKind {
-    #[serde(rename = "oom")]
-    Oom,
-    #[serde(rename = "model")]
-    Model,
-    #[serde(rename = "input")]
-    Input,
-    #[serde(rename = "unknown")]
-    Unknown,
-}
-
-/// Message from core to worker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WorkerCommand {
-    Generate {
-        id: String,
-        prompt: String,
-        sources: Vec<String>,
-        mask: Option<String>,
-        width: usize,
-        height: usize,
-        seed: i64,
-        options: serde_json::Value,
-        output: String,
-    },
-    Cancel { id: String },
-}
-
-impl WorkerCommand {
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap()
+/// The interpreter inside a venv.
+pub fn venv_python(env_dir: &Path) -> std::path::PathBuf {
+    if cfg!(windows) {
+        env_dir.join("Scripts").join("python.exe")
+    } else {
+        env_dir.join("bin").join("python")
     }
 }
 
-/// The worker process handle.
-pub struct WorkerHandle {
-    model: String,
-    variant: String,
-    child: Arc<Mutex<Option<Child>>>,
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
-    state: Arc<Mutex<EngineState>>,
-    device: Arc<Mutex<Option<String>>>,
-    vram: Arc<Mutex<Option<f64>>>,
-    shutdown: Arc<AtomicBool>,
+pub struct Worker {
+    child: Arc<Mutex<Child>>,
+    /// Shared with `sender()`, so a cancel can be written while `stream` waits for the result.
+    stdin: Arc<Mutex<ChildStdin>>,
+    rx: Receiver<Value>,
+    pub hello: Value,
 }
 
-impl WorkerHandle {
-    /// Start the Python diffusion worker for the given model and variant.
-    pub fn start(model: &str, variant: &str, models_folder: &str, compute_target: &str) -> Result<Self, String> {
-        let state = Arc::new(Mutex::new(EngineState::Loading { elapsed: 0.0 }));
-        let state_clone = state.clone();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let device = Arc::new(Mutex::new(None));
-        let vram = Arc::new(Mutex::new(None));
-
-        let child = Command::new("python")
-            .args(&[
-                "-X", "utf8",
-                "-u", // unbuffered output
-                "engines/diffusion_worker.py",
-                model,
-                variant,
-                models_folder,
-                compute_target,
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .env("LATENT_DEVICE", compute_target)
-            .env("HF_HOME", models_folder)
-            .env("LATENT_CACHE", "") // will be set to cache dir
-            .spawn()
-            .map_err(|e| format!("Failed to start diffusion worker: {}", e))?;
-
-        let mut child = child;
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-
-        // Spawn the reader task that processes worker output
-        let shutdown_clone = shutdown.clone();
-        let state_reader = state.clone();
-        let device_reader = device.clone();
-        let vram_reader = vram.clone();
-
-        task::spawn(async move {
-            use tokio::io::AsyncBufReadExt;
-            // ChildStdout doesn't implement AsyncRead, use std::io::BufReader in for loop
-            let reader = std::io::BufReader::new(stdout);
-            for line_result in reader.lines() {
-                match line_result {
-                    Ok(msg_line) => {
-                        let msg_line = msg_line.trim().to_string();
-                        if msg_line.is_empty() { continue; }
-                        if shutdown_clone.load(Ordering::Relaxed) { break; }
-
-                        if let Ok(msg) = serde_json::from_str::<WorkerEvent>(&msg_line) {
-                            match &msg {
-                                WorkerEvent::Ready { model, variant, device: dev, vram: mem, .. } => {
-                                    *state_reader.lock().unwrap() = EngineState::Warm;
-                                    *device_reader.lock().unwrap() = Some(dev.clone());
-                                    *vram_reader.lock().unwrap() = Some(*mem);
-                                    log::info!("Worker ready: {} {} on {} ({} GB VRAM)", model, variant, dev, mem);
-                                }
-                                WorkerEvent::Done { id, output: _, seed: _, elapsed: dur, .. } => {
-                                    let mut s = state_reader.lock().unwrap();
-                                    *s = EngineState::Warm;
-                                    log::info!("Generation done: {} in {:.1}s", id, dur);
-                                }
-                                WorkerEvent::Busy { .. } => {
-                                    *state_reader.lock().unwrap() = EngineState::Busy;
-                                }
-                                WorkerEvent::Progress { step: _, steps: _, .. } => {
-                                    let _s = state_reader.lock().unwrap();
-                                }
-                                WorkerEvent::Error { kind, message, .. } => {
-                                    match kind {
-                                        ErrorKind::Oom => {
-                                            let mut s = state_reader.lock().unwrap();
-                                            *s = EngineState::Warm;
-                                            log::warn!("OOM error: {}", message);
-                                        }
-                                        ErrorKind::Model => {
-                                            *state_reader.lock().unwrap() = EngineState::Crashed { message: message.to_string() };
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                _ => {}
-                            }
-                            emit_event(msg);
-                        } else if msg_line.starts_with("[") || msg_line.contains("WARNING") || msg_line.contains("ERROR") {
-                            log::debug!("Worker log: {}", msg_line);
-                        }
+impl Worker {
+    pub fn start(
+        python: &Path,
+        script: &Path,
+        args: &[&str],
+        envs: &[(&str, String)],
+        log: &Path,
+        ready_timeout: Duration,
+    ) -> Result<Worker, String> {
+        if !python.is_file() {
+            return Err(format!("Python not found at {}", python.display()));
+        }
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .map_err(|e| format!("can't open log {}: {e}", log.display()))?;
+        let mut cmd = Command::new(python);
+        cmd.arg("-X").arg("utf8").arg(script).args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(log_file))
+            .env("PYTHONUNBUFFERED", "1")
+            .env("PYTHONIOENCODING", "utf-8");
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        hidden(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| format!("couldn't start {}: {e}", script.display()))?;
+        adopt(&child);
+        let stdin = child.stdin.take().ok_or("no stdin")?;
+        let stdout = child.stdout.take().ok_or("no stdout")?;
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    if tx.send(v).is_err() {
+                        break;
                     }
-                    Err(_) => break,
                 }
-            }
-
-            if !shutdown_clone.load(Ordering::Relaxed) {
-                let mut s = state_reader.lock().unwrap();
-                *s = EngineState::Crashed { message: "Worker exited unexpectedly".into() };
             }
         });
-
-        Ok(WorkerHandle {
-            model: model.to_string(),
-            variant: variant.to_string(),
-            child: Arc::new(Mutex::new(Some(child))),
-            stdin: Arc::new(Mutex::new(Some(stdin))),
-            state,
-            device,
-            vram,
-            shutdown,
-        })
+        let mut worker = Worker { child: Arc::new(Mutex::new(child)), stdin: Arc::new(Mutex::new(stdin)), rx, hello: Value::Null };
+        worker.hello = worker
+            .wait_for("ready", ready_timeout)
+            .map_err(|e| format!("{e} while loading (details in {})", log.display()))?;
+        Ok(worker)
     }
 
-    /// Send a request to the worker and stream events via a channel.
-    pub fn request_stream(
-        &self,
-        cmd: WorkerCommand,
-        rx: mpsc::UnboundedSender<WorkerEvent>,
-    ) -> Result<(), String> {
-        // Write command to worker's stdin (sync write, worker is local process)
-        let mut stdin = self.stdin.lock().unwrap();
-        if let Some(stdin) = stdin.as_mut() {
-            let json = serde_json::to_string(&cmd).map_err(|e| format!("Failed to serialize command: {}", e))?;
-            stdin.write_all(json.as_bytes()).map_err(|e| format!("Failed to write to worker: {}", e))?;
-            stdin.write_all(b"\n").map_err(|e| format!("Failed to write newline: {}", e))?;
-            stdin.flush().map_err(|e| format!("Failed to flush: {}", e))?;
-        } else {
-            return Err("Worker stdin closed".into());
-        }
-
-        Ok(())
-    }
-
-    /// Send a cancel command to the worker.
-    pub fn cancel(&self, batch_id: &str) -> Result<(), String> {
-        let cmd = WorkerCommand::Cancel { id: batch_id.to_string() };
-        let mut stdin = self.stdin.lock().unwrap();
-        if let Some(stdin) = stdin.as_mut() {
-            let json = serde_json::to_string(&cmd).map_err(|e| format!("Failed to serialize cancel: {}", e))?;
-            stdin.write_all(json.as_bytes()).map_err(|e| format!("Failed to write cancel: {}", e))?;
-            stdin.write_all(b"\n").map_err(|e| format!("Failed to write newline: {}", e))?;
-            stdin.flush().map_err(|e| format!("Failed to flush: {}", e))?;
-        }
-        Ok(())
-    }
-
-    /// Unload the model from the worker.
-    pub async fn unload(&self) -> Result<(), String> {
-        *self.state.lock().unwrap() = EngineState::Unloading;
-        let cmd = WorkerCommand::Generate {
-            id: "unload".into(),
-            prompt: "".into(),
-            sources: vec![],
-            mask: None,
-            width: 1,
-            height: 1,
-            seed: 0,
-            options: serde_json::json!({"unload": true}),
-            output: "".into(),
-        };
-        self.request_stream(cmd, mpsc::unbounded_channel().0)?;
-        Ok(())
-    }
-
-    /// Check if the worker is ready (warm).
-    pub fn is_ready(&self) -> bool {
-        matches!(*self.state.lock().unwrap(), EngineState::Warm)
-    }
-
-    /// Get current state.
-    pub fn state(&self) -> EngineState {
-        self.state.lock().unwrap().clone()
-    }
-
-    /// Get the device type.
-    pub fn device(&self) -> Option<String> {
-        self.device.lock().unwrap().clone()
-    }
-
-    /// Get VRAM usage.
-    pub fn vram_usage(&self) -> Option<f64> {
-        self.vram.lock().unwrap().clone()
-    }
-
-    /// Stop the worker.
-    pub fn stop(&self) -> Result<(), String> {
-        self.shutdown.store(true, Ordering::Relaxed);
-        let mut child_guard = self.child.lock().unwrap();
-        if let Some(ref mut child) = *child_guard {
-            #[cfg(windows)]
-            {
-                child.kill().map_err(|e| format!("Failed to kill worker: {}", e))?;
+    fn wait_for(&self, event: &str, timeout: Duration) -> Result<Value, String> {
+        loop {
+            match self.rx.recv_timeout(timeout) {
+                Ok(v) => match v["event"].as_str() {
+                    Some("error") => return Err(v["message"].as_str().unwrap_or("unknown error").to_string()),
+                    Some(e) if e == event => return Ok(v),
+                    _ => {}
+                },
+                Err(RecvTimeoutError::Timeout) => return Err("timed out".into()),
+                Err(RecvTimeoutError::Disconnected) => return Err("the model stopped".into()),
             }
-            #[cfg(not(windows))]
-            {
-                unsafe {
-                    let pid = child.id() as libc::pid_t;
-                    libc::kill(-pid, libc::SIGTERM);
-                }
-            }
-            let _ = child.wait();
         }
-        *child_guard = None;
-        Ok(())
     }
 
-    pub fn model(&self) -> &str {
-        &self.model
+    /// Sends one request and passes its `progress` events to `on_progress` until it ends. Returns the final event
+    /// (`done`, `cancelled` or `error`) for the caller to judge; Err only when the process stopped or went silent
+    /// for `timeout`.
+    pub fn stream(&self, req: &Value, timeout: Duration, mut on_progress: impl FnMut(&Value)) -> Result<Value, String> {
+        send(&self.stdin, req)?;
+        let id = &req["id"];
+        loop {
+            match self.rx.recv_timeout(timeout) {
+                Ok(v) if &v["id"] != id => {}
+                Ok(v) => match v["event"].as_str() {
+                    Some("progress") => on_progress(&v),
+                    Some("done" | "cancelled" | "error") => return Ok(v),
+                    _ => {}
+                },
+                Err(RecvTimeoutError::Timeout) => return Err("the model didn't answer".into()),
+                Err(RecvTimeoutError::Disconnected) => return Err("the model stopped".into()),
+            }
+        }
     }
 
-    pub fn variant(&self) -> &str {
-        &self.variant
+    /// A handle that can write to the worker while a request is in flight (used by Cancel).
+    pub fn sender(&self) -> Arc<Mutex<ChildStdin>> {
+        self.stdin.clone()
+    }
+
+    /// A handle that can kill the process while a request is in flight (the fallback when Cancel isn't answered).
+    pub fn killer(&self) -> Arc<Mutex<Child>> {
+        self.child.clone()
     }
 }
 
-/// Global event channel for worker events.
-static EVENT_TX: Mutex<Option<mpsc::UnboundedSender<serde_json::Value>>> = Mutex::new(None);
-
-/// Set the global event sender (called by Tauri event system).
-pub fn set_event_tx(tx: mpsc::UnboundedSender<serde_json::Value>) {
-    let mut guard = EVENT_TX.lock().unwrap();
-    *guard = Some(tx);
+/// Writes one JSON line to a worker.
+pub fn send(stdin: &Mutex<ChildStdin>, msg: &Value) -> Result<(), String> {
+    let mut w = stdin.lock().map_err(|_| "the model stopped".to_string())?;
+    writeln!(w, "{msg}").and_then(|_| w.flush()).map_err(|_| "the model stopped".to_string())
 }
 
-/// Emit an event to the UI.
-fn emit_event(event: WorkerEvent) {
-    if let Some(tx) = EVENT_TX.lock().unwrap().as_ref() {
-        if let Ok(json) = serde_json::to_value(&event) {
-            let _ = tx.send(json);
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if let Ok(mut c) = self.child.lock() {
+            kill_tree(&mut c);
         }
     }
 }

@@ -1,1032 +1,448 @@
-// Latent — Tauri application entry point
-// Ties hw/models/settings/worker/frame_cache together,
-// implements all Tauri commands and event forwarding.
+// No console window behind the app in release builds.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod engine;
 mod hw;
+mod install;
+mod library;
 mod models;
-mod settings;
-mod frame_cache;
+mod store;
 mod worker;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Instant;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use engine::{GenRequest, Manager};
+use library::{Library, Source};
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use store::Settings;
+use tauri::{AppHandle, Emitter, Manager as _, RunEvent, State};
+use tauri_plugin_dialog::DialogExt;
 
-use std::io::BufRead as _;
-use tokio::sync::Mutex;
-use tauri::Emitter;
-use tauri::Manager;
-use worker::{set_event_tx, WorkerCommand};
-
-/// Internal state shared across Tauri commands.
-struct AppState {
-    settings: Arc<Mutex<settings::Settings>>,
-    hw_info: hw::HwInfo,
-    worker: Arc<Mutex<Option<worker::WorkerHandle>>>,
-    frame_index: Arc<Mutex<frame_cache::FrameIndex>>,
-    sources: Arc<Mutex<Vec<frame_cache::Source>>>,
-    /// Track pending frames per batch: batch_id -> (remaining_count, model, variant)
-    pending_batches: Arc<Mutex<HashMap<String, (usize, String, String)>>>,
-    /// Timestamp of last user activity (for idle unload).
-    last_activity: Arc<Mutex<Instant>>,
+struct Dirs {
+    resources: PathBuf,
+    logs: PathBuf,
+    settings: PathBuf,
 }
 
-// ── Bootstrap ─────────────────────────────────────────────────────
+struct App {
+    dirs: Dirs,
+    settings: Mutex<Settings>,
+    library: Library,
+    engines: Arc<Manager>,
+    hw: Mutex<hw::Hardware>,
+}
+
+type Shared = Arc<App>;
+
+impl App {
+    fn paths(&self) -> engine::Paths {
+        // Separate statements: each lock is released before the next one is taken.
+        let home = PathBuf::from(&self.settings.lock().unwrap().models_dir);
+        let device = self.device();
+        let device_env = if device == "rocm" {
+            self.hw.lock().unwrap().rocm_env.iter().filter(|(k, _)| std::env::var_os(k).is_none()).cloned().collect()
+        } else {
+            Vec::new()
+        };
+        engine::Paths { home, workers: self.dirs.resources.join("engines"), logs: self.dirs.logs.clone(), device, device_env }
+    }
+
+    fn device(&self) -> String {
+        let setting = self.settings.lock().unwrap().device.clone();
+        let hw = self.hw.lock().unwrap().clone();
+        hw::resolve_device(&setting, &hw)
+    }
+
+    /// The catalog with what this PC has: installed or not, and whether each variant fits.
+    fn models(&self) -> Value {
+        let home = PathBuf::from(&self.settings.lock().unwrap().models_dir);
+        let hw = self.hw.lock().unwrap().clone();
+        let on_gpu = self.device() != "cpu";
+        let fits = |need_vram: f64, need_ram: f64| {
+            let (need, have) = if on_gpu { (need_vram, hw.vram_total) } else { (need_ram, hw.ram_total) };
+            if have <= 0.0 || need <= have - 1.0 { "yes" } else if need <= have { "tight" } else { "no" }
+        };
+        models::CATALOG
+            .iter()
+            .map(|m| {
+                let mut v = serde_json::to_value(m).unwrap_or_default();
+                v["installed"] = install::is_installed(&home, m).into();
+                v["sizes"] = m.sizes.iter().map(|(a, w, h)| json!({ "aspect": a, "width": w, "height": h })).collect();
+                for (j, variant) in m.variants.iter().enumerate() {
+                    v["variants"][j]["fits"] = fits(variant.vram, variant.ram).into();
+                }
+                v
+            })
+            .collect()
+    }
+}
+
+/// Long work runs off the async runtime so the interface never waits on it.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------- commands
 
 #[tauri::command]
-async fn bootstrap(
-    handle: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let s = state.settings.clone();
-    let hw = state.hw_info.clone();
-
-    // Lock settings to access models_folder
-    let settings_ref = s.lock().await;
-
-    // Enrich model catalog with install state from disk
-    let catalog = models::catalog();
-    let installed_ids: Vec<String> = catalog
-        .iter()
-        .filter(|m| model_is_installed(&settings_ref.models_folder, m))
-        .map(|m| m.id.clone())
-        .collect();
-
-    let models_json: Vec<serde_json::Value> = catalog
-        .iter()
-        .map(|m| model_to_json(m, &installed_ids))
-        .collect();
-
-    // Gather sources from import dir
-    let sources = state.sources.lock().await.clone();
-    let sources_json: Vec<serde_json::Value> = sources
-        .iter()
-        .map(|src| source_to_json(src))
-        .collect();
-
-    // Frame list
-    let index = state.frame_index.lock().await;
-    let frames_json = frames_to_json(&index.frames);
-    let batches = frame_cache::get_batches(&index);
-    let unsaved = frame_cache::unsaved_count(&index);
-
-    // Resident model info
-    let resident = {
-        let w = state.worker.blocking_lock();
-        match w.as_ref() {
-            Some(w) => serde_json::json!({
-                "model": w.model(),
-                "variant": w.variant(),
-                "state": format!("{}", w.state()),
-            }),
-            None => serde_json::json!({}),
-        }
-    };
-
-    Ok(serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "settings": serde_json::to_value(&*settings_ref).unwrap(),
-        "hw": serde_json::to_value(&hw).unwrap(),
-        "models": models_json,
-        "sources": sources_json,
-        "frames": frames_json,
-        "batches": serde_json::to_value(batches.iter().map(|(k, v)| {
-            serde_json::json!({
-                "batch": k,
-                "frames": serde_json::to_value(v.iter().map(|f| {
-                    serde_json::json!({
-                        "id": f.id,
-                        "batch": f.batch,
-                        "index": f.index,
-                        "path": f.path.to_string_lossy().to_string(),
-                        "thumb": f.thumb.to_string_lossy().to_string(),
-                        "width": f.width,
-                        "height": f.height,
-                        "seed": f.seed,
-                        "recipe": serde_json::to_value(&f.recipe).unwrap_or_default(),
-                        "model": f.model,
-                        "variant": f.variant,
-                        "elapsed": f.elapsed,
-                        "saved": f.saved.clone(),
-                        "created_at": f.created_at.to_rfc3339(),
-                    })
-                }).collect::<Vec<_>>()).unwrap_or_default(),
-            })
-        }).collect::<Vec<_>>()).unwrap_or_default(),
-        "unsaved": unsaved,
-        "resident": resident,
-    }))
-}
-
-fn model_is_installed(models_folder: &PathBuf, model: &models::Model) -> bool {
-    let model_dir = models_folder.join(&model.id);
-    model_dir.exists()
-}
-
-fn model_to_json(m: &models::Model, installed_ids: &[String]) -> serde_json::Value {
-    let mut json = serde_json::to_value(m).unwrap_or_default();
-    if let Some(obj) = json.as_object_mut() {
-        obj.insert(
-            "installed".to_string(),
-            serde_json::Value::Bool(installed_ids.contains(&m.id)),
-        );
-    }
-    json
-}
-
-fn source_to_json(src: &frame_cache::Source) -> serde_json::Value {
-    serde_json::json!({
-        "id": src.id,
-        "path": src.path.to_string_lossy().to_string(),
-        "thumb": src.thumb.to_string_lossy().to_string(),
-        "width": src.width,
-        "height": src.height,
-        "name": src.name,
+fn bootstrap(handle: AppHandle, app: State<'_, Shared>) -> Value {
+    // Copy everything out first: locks taken inside json!() would be held until the end of it.
+    let settings = app.settings.lock().unwrap().clone();
+    let hardware = app.hw.lock().unwrap().clone();
+    json!({
+        "version": handle.package_info().version.to_string(),
+        "settings": settings,
+        "hw": hardware,
+        "device": app.device(),
+        "models": app.models(),
+        "sources": app.library.sources(),
+        "frames": app.library.frames(),
+        "resident": app.engines.resident(),
+        "logs": app.dirs.logs,
+        "platform": std::env::consts::OS,
     })
 }
 
-fn frames_to_json(frames: &[frame_cache::Frame]) -> Vec<serde_json::Value> {
-    frames
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "id": f.id,
-                "batch": f.batch,
-                "index": f.index,
-                "path": f.path.to_string_lossy().to_string(),
-                "thumb": f.thumb.to_string_lossy().to_string(),
-                "width": f.width,
-                "height": f.height,
-                "seed": f.seed,
-                "recipe": serde_json::to_value(&f.recipe).unwrap_or_default(),
-                "model": f.model,
-                "variant": f.variant,
-                "elapsed": f.elapsed,
-                "saved": f.saved.clone(),
-                "created_at": f.created_at.to_rfc3339(),
-            })
-        })
-        .collect()
-}
-
-fn batches_to_json(batches: &[(String, Vec<frame_cache::Frame>)]) -> Vec<serde_json::Value> {
-    batches
-        .iter()
-        .map(|(batch_id, frames)| {
-            serde_json::json!({
-                "batch": batch_id,
-                "frames": frames_to_json(frames),
-            })
-        })
-        .collect()
-}
-
-// ── Settings ──────────────────────────────────────────────────────
-
-async fn save_settings_clone(s: &settings::Settings) -> serde_json::Value {
-    serde_json::to_value(s).unwrap_or_default()
+#[tauri::command]
+fn save_settings(app: State<'_, Shared>, settings: Settings) -> Result<Settings, String> {
+    store::save(&app.dirs.settings, &settings)?;
+    *app.settings.lock().unwrap() = settings.clone();
+    Ok(settings)
 }
 
 #[tauri::command]
-async fn save_settings(
-    state: tauri::State<'_, AppState>,
-    settings: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let s = serde_json::from_value::<settings::Settings>(settings)
-        .map_err(|e| format!("Invalid settings: {}", e))?;
-
-    {
-        let mut st = state.settings.lock().await;
-        settings::save(&s).map_err(|e| e.to_string())?;
-        *st = s.clone();
-        drop(st);
-    }
-
-    Ok(serde_json::to_value(&s).unwrap_or_default())
-}
-
-// ── Models ────────────────────────────────────────────────────────
-
-#[tauri::command]
-async fn models(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let catalog = models::catalog();
-    let installed_ids: Vec<String> = catalog
-        .iter()
-        .filter(|m| model_is_installed(&state.settings.blocking_lock().models_folder, m))
-        .map(|m| m.id.clone())
-        .collect();
-
-    Ok(catalog
-        .iter()
-        .map(|m| model_to_json(m, &installed_ids))
-        .collect())
-}
-
-#[tauri::command]
-async fn install_model(
-    handle: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    model_id: String,
-    variant: String,
-) -> Result<serde_json::Value, String> {
-    let catalog = models::catalog();
-    let model = catalog
-        .iter()
-        .find(|m| m.id == model_id)
-        .ok_or_else(|| format!("Unknown model: {}", model_id))?;
-
-    let variant_obj = model
-        .variants
-        .iter()
-        .find(|v| v.id == variant)
-        .ok_or_else(|| format!("Unknown variant: {}", variant))?;
-
-    // Emit install events via Tauri
-    let phases: Vec<(&str, Option<u64>, Option<u32>, Option<&str>)> = vec![
-        ("env", None, None, None),
-        ("torch", None, None, None),
-        ("weights", Some(variant_obj.disk_mb), Some(100), None),
-        ("verify", None, None, None),
-        ("done", None, Some(100), None),
-    ];
-
-    for (phase, total, done, message) in phases {
-        if let Err(e) = handle.emit("install", serde_json::json!({
-            "id": model_id,
-            "phase": phase,
-            "total": total,
-            "done": done,
-            "message": message,
-        })) {
-            log::warn!("Failed to emit install event: {}", e);
-        }
-        // Small delay to simulate work (would be actual download in phase 1)
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-
-    Ok(model_to_json(model, &[model_id.clone()]).into())
-}
-
-#[tauri::command]
-async fn remove_model(
-    state: tauri::State<'_, AppState>,
-    model_id: String,
-) -> Result<serde_json::Value, String> {
-    let catalog = models::catalog();
-    let model = catalog
-        .iter()
-        .find(|m| m.id == model_id)
-        .ok_or_else(|| format!("Unknown model: {}", model_id))?;
-
-    // Unload if currently resident
-    {
-        let mut worker_guard = state.worker.lock().await;
-        if let Some(ref worker) = *worker_guard {
-            if worker.model() == &model_id {
-                worker.stop().ok();
-                *worker_guard = None;
-            }
-        }
-    }
-
-    // Remove model folder
-    let models_folder = &state.settings.lock().await.models_folder;
-    let model_dir = models_folder.join(&model_id);
-    if model_dir.exists() {
-        std::fs::remove_dir_all(&model_dir).ok();
-    }
-
-    Ok(model_to_json(model, &[]).into())
-}
-
-// ── Engine Lifecycle ──────────────────────────────────────────────
-
-#[tauri::command]
-async fn preload(
-    handle: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    model: serde_json::Value,
-    variant: serde_json::Value,
-) -> Result<(), String> {
-    let model_id: String = model.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let variant_id: String = variant.as_str().unwrap_or("").to_string();
-
-    let catalog = models::catalog();
-    let model_def = catalog
-        .iter()
-        .find(|m| m.id == model_id)
-        .ok_or_else(|| format!("Unknown model: {}", model_id))?;
-
-    // Pick variant
-    let variant_obj = model_def
-        .variants
-        .iter()
-        .find(|v| v.id == variant_id)
-        .or_else(|| model_def.variants.first())
-        .ok_or_else(|| "No variants available".to_string())?;
-
-    let s = state.settings.lock().await;
-    let compute = match s.compute_target {
-        settings::ComputeTarget::Auto => "auto",
-        settings::ComputeTarget::Gpu => "gpu",
-        settings::ComputeTarget::Cpu => "cpu",
-    };
-
-    // Emit engine state: loading
-    if let Err(e) = handle.emit("engine", serde_json::json!({
-        "model": model_id,
-        "variant": variant_id,
-        "state": "loading",
-        "elapsed": 0.0,
-    })) {
-        log::warn!("Failed to emit engine event: {}", e);
-    }
-
-    // Start worker
-    let start = Instant::now();
-    let worker = worker::WorkerHandle::start(
-        &model_id,
-        &variant_id,
-        s.models_folder.to_str().ok_or("Invalid models path")?,
-        compute,
-    )
-    .map_err(|e| format!("Failed to preload model: {}", e))?;
-
-    *state.worker.lock().await = Some(worker);
-    *state.last_activity.lock().await = Instant::now();
-
-    // Wait for ready event (up to 30s)
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        // The ready event flows through the global event channel → Tauri emit
-        // We just need to wait a moment for it to arrive
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+async fn install_model(handle: AppHandle, app: State<'_, Shared>, id: String) -> Result<Value, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let m = models::find(&id)?;
+        let (home, token) = {
+            let s = app.settings.lock().unwrap();
+            (PathBuf::from(&s.models_dir), s.hf_token.clone())
+        };
+        install::install(Some(&handle), &home, &app.dirs.logs, m, &app.device(), &token).inspect_err(|e| {
+            let _ = handle.emit("install", json!({ "id": id, "phase": "failed", "label": e }));
+        })?;
+        Ok(app.models())
     })
     .await
-    .ok();
-
-    let elapsed = start.elapsed().as_secs_f64();
-    if let Err(e) = handle.emit("engine", serde_json::json!({
-        "model": model_id,
-        "variant": variant_id,
-        "state": "warm",
-        "elapsed": elapsed,
-    })) {
-        log::warn!("Failed to emit engine event: {}", e);
-    }
-
-    Ok(())
 }
 
 #[tauri::command]
-async fn unload(
-    state: tauri::State<'_, AppState>,
-    handle: tauri::AppHandle,
-) -> Result<(), String> {
-    if let Err(e) = handle.emit("engine", serde_json::json!({
-        "state": "unloading",
-    })) {
-        log::warn!("Failed to emit engine event: {}", e);
-    }
-
-    if let Some(worker) = state.worker.lock().await.take() {
-        worker.stop().ok();
-    }
-
-    Ok(())
+async fn remove_model(handle: AppHandle, app: State<'_, Shared>, id: String) -> Result<Value, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let m = models::find(&id)?;
+        if app.engines.resident().as_deref() == Some(m.id) {
+            app.engines.unload(&handle);
+        }
+        let home = PathBuf::from(&app.settings.lock().unwrap().models_dir);
+        if !install::is_installed(&home, m) {
+            return Err(format!("{} wasn't downloaded by Latent, so Latent won't delete its files.", m.name));
+        }
+        install::remove(&home, m)?;
+        Ok(app.models())
+    })
+    .await
 }
 
-// ── Generate ──────────────────────────────────────────────────────
+#[tauri::command]
+async fn preload(handle: AppHandle, app: State<'_, Shared>, model: String, variant: Option<String>) -> Result<(), String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let m = models::find(&model)?;
+        app.engines.preload(&handle, &app.paths(), m, m.variant(variant.as_deref()).id)
+    })
+    .await
+}
 
 #[tauri::command]
-async fn generate(
-    handle: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    request: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let gen_req: frame_cache::GenRequest =
-        serde_json::from_value(request).map_err(|e| format!("Invalid request: {}", e))?;
+async fn unload(handle: AppHandle, app: State<'_, Shared>) -> Result<(), String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        app.engines.unload(&handle);
+        Ok(())
+    })
+    .await
+}
 
-    let worker = state.worker.lock().await;
-    let worker = worker.as_ref().ok_or("No model loaded — preload first")?;
-
-    let batch_id = uuid::Uuid::new_v4().to_string();
-    let count = gen_req.count.max(1).min(8);
-    let variant = gen_req
-        .variant
-        .clone()
-        .unwrap_or_else(|| "default".into());
-    let model_id = gen_req.model.clone();
-
-    // Register pending frames
+/// Starts a batch and returns its id at once; frames arrive as events.
+#[tauri::command]
+fn generate(handle: AppHandle, app: State<'_, Shared>, request: GenRequest) -> Result<Value, String> {
+    let m = models::find(&request.model)?;
+    request.check(m)?;
+    let sources = request.sources.iter().map(|id| app.library.source(id).map(|s| s.path)).collect::<Result<Vec<_>, _>>()?;
+    if !app.engines.claim() {
+        return Err("Still developing the last batch. Esc cancels it.".into());
+    }
+    let batch = format!("b{}", library::now_ms());
     {
-        let mut batches = state.pending_batches.lock().await;
-        batches.insert(
-            batch_id.clone(),
-            (count, model_id.clone(), variant.clone()),
-        );
+        let mut s = app.settings.lock().unwrap();
+        if s.last_model != m.id {
+            s.last_model = m.id.to_string();
+            let _ = store::save(&app.dirs.settings, &*s);
+        }
     }
+    let app = app.inner().clone();
+    let id = batch.clone();
+    std::thread::spawn(move || app.engines.run_batch(&handle, &app.paths(), &app.library, &id, &request, &sources));
+    Ok(json!({ "batch": batch }))
+}
 
-    // Update last activity
-    *state.last_activity.lock().await = Instant::now();
+#[tauri::command]
+fn cancel(app: State<'_, Shared>, batch: String) {
+    app.engines.cancel(&batch);
+}
 
-    // Send generate commands for each frame
-    for i in 0..count {
-        let seed = gen_req
-            .seed
-            .map(|s| s + i as i64)
-            .unwrap_or_else(|| rand::random::<u64>() as i64 % (i64::MAX - 1) + 1);
-
-        let cache_dir = frame_cache::cache_dir();
-        let output_path = cache_dir.join(format!("{}.{}.png", batch_id, i));
-
-        let cmd = WorkerCommand::Generate {
-            id: format!("{}-{}", batch_id, i),
-            prompt: gen_req.prompt.clone(),
-            sources: gen_req.sources.clone(),
-            mask: gen_req.mask.clone(),
-            width: gen_req.width,
-            height: gen_req.height,
-            seed,
-            options: serde_json::Value::Object(serde_json::Map::from_iter(
-                gen_req.options.clone().into_iter(),
-            )),
-            output: output_path.to_string_lossy().to_string(),
+#[tauri::command]
+async fn import_sources(handle: AppHandle, app: State<'_, Shared>, paths: Option<Vec<String>>) -> Result<Vec<Source>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let paths: Vec<PathBuf> = match paths {
+            Some(p) => p.into_iter().map(PathBuf::from).collect(),
+            None => handle
+                .dialog()
+                .file()
+                .set_title("Import photos")
+                .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+                .blocking_pick_files()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|p| p.into_path().ok())
+                .collect(),
         };
-
-        let rx = tokio::sync::mpsc::unbounded_channel().0;
-        worker.request_stream(cmd, rx)?;
-    }
-
-    Ok(serde_json::json!({"batch": batch_id}))
+        paths.iter().map(|p| app.library.import(p)).collect()
+    })
+    .await
 }
 
 #[tauri::command]
-async fn cancel(
-    state: tauri::State<'_, AppState>,
-    handle: tauri::AppHandle,
-    batch_id: String,
-) -> Result<(), String> {
-    // Cancel all frames in the batch
-    let worker = state.worker.lock().await;
-    if let Some(worker) = worker.as_ref() {
-        // Send cancel for each frame in the batch
-        for i in 0..20 {
-            let cancel_id = format!("{}-{}", batch_id, i);
-            worker.cancel(&cancel_id).ok();
-        }
-    }
-
-    // Emit cancelled batch
-    if let Err(e) = handle.emit(
-        "batch",
-        serde_json::json!({
-            "batch": batch_id,
-            "state": "cancelled",
-        }),
-    ) {
-        log::warn!("emit failed: {}", e);
-    }
-
-    // Remove from pending
-    state.pending_batches.lock().await.remove(&batch_id);
-
-    Ok(())
-}
-
-// ── Sources ───────────────────────────────────────────────────────
-
-#[tauri::command]
-async fn import_sources(
-    state: tauri::State<'_, AppState>,
-    paths: Option<Vec<String>>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let mut sources = state.sources.lock().await;
-    let paths = paths.unwrap_or_default();
-
-    for path_str in paths {
-        let path = PathBuf::from(&path_str);
-        if !path.exists() {
-            continue;
-        }
-
-        // Get dimensions
-        let (width, height) = image_dimensions(&path).unwrap_or((0, 0));
-
-        // Create thumb
-        let cache_dir = frame_cache::cache_dir();
-        let id = uuid::Uuid::new_v4().to_string();
-        let thumb_path = cache_dir.join(format!("{}.thumb.png", id));
-        let saved_path = frame_cache::Source::import_source(&path, &thumb_path);
-
-        if let Ok(saved) = saved_path {
-            sources.push(frame_cache::Source {
-                id: id.clone(),
-                path: saved,
-                thumb: thumb_path,
-                width,
-                height,
-                name: path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                from_frame: None,
-            });
-        }
-    }
-
-    Ok(sources.iter().map(source_to_json).collect())
+async fn paste_source(app: State<'_, Shared>, png: String) -> Result<Source, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let bytes = STANDARD.decode(png.split(',').next_back().unwrap_or_default()).map_err(|e| e.to_string())?;
+        app.library.paste(&bytes)
+    })
+    .await
 }
 
 #[tauri::command]
-async fn paste_source(
-    state: tauri::State<'_, AppState>,
-    png_base64: String,
-) -> Result<serde_json::Value, String> {
-    let bytes = base64_decode(&png_base64).map_err(|e| format!("Invalid base64: {}", e))?;
-    let cache_dir = frame_cache::cache_dir();
-    let id = uuid::Uuid::new_v4().to_string();
-    let thumb_path = cache_dir.join(format!("{}.thumb.png", id));
-    let saved_path = cache_dir.join(format!("{}.paste.png", id));
+async fn frame_to_source(app: State<'_, Shared>, frame: String) -> Result<Source, String> {
+    let app = app.inner().clone();
+    blocking(move || app.library.source_from_frame(&frame)).await
+}
 
-    // Save PNG
-    std::fs::write(&saved_path, &bytes).map_err(|e| e.to_string())?;
+#[tauri::command]
+fn delete_source(app: State<'_, Shared>, id: String) -> Result<(), String> {
+    app.library.delete_source(&id)
+}
 
-    // Create thumbnail
-    if let Ok(img) = image::load_from_memory(&bytes) {
-        let thumb = image::imageops::thumbnail(&img, 100, 100);
-        thumb.save(&thumb_path).ok();
+fn unique(dir: &Path, stem: &str) -> PathBuf {
+    let mut p = dir.join(format!("{stem}.png"));
+    let mut n = 2;
+    while p.exists() {
+        p = dir.join(format!("{stem} ({n}).png"));
+        n += 1;
     }
+    p
+}
 
-    let source = frame_cache::Source {
-        id: id.clone(),
-        path: saved_path,
-        thumb: thumb_path,
-        width: 0,
-        height: 0,
-        name: "Pasted image".into(),
-        from_frame: None,
+/// A file name from the first words of the prompt and the seed: "lighthouse-at-dusk-41.png".
+fn file_stem(prompt: &str, seed: i64) -> String {
+    let words: Vec<String> = prompt
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take(5)
+        .map(str::to_lowercase)
+        .collect();
+    if words.is_empty() { format!("latent-{seed}") } else { format!("{}-{seed}", words.join("-")) }
+}
+
+/// Saving copies the PNG as it is, so the recipe and the AI-generated mark in it are kept.
+#[tauri::command]
+async fn save_frame(app: State<'_, Shared>, id: String) -> Result<String, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let f = app.library.frame(&id)?;
+        let dir = PathBuf::from(&app.settings.lock().unwrap().save_dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
+        let dst = unique(&dir, &file_stem(f.recipe["prompt"].as_str().unwrap_or_default(), f.seed));
+        std::fs::copy(&f.path, &dst).map_err(|e| format!("can't save to {}: {e}", dst.display()))?;
+        let dst = dst.to_string_lossy().to_string();
+        app.library.mark_saved(&id, &dst);
+        Ok(dst)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn save_frame_as(handle: AppHandle, app: State<'_, Shared>, id: String) -> Result<Option<String>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let f = app.library.frame(&id)?;
+        let picked = handle
+            .dialog()
+            .file()
+            .set_title("Save frame as")
+            .set_file_name(format!("{}.png", file_stem(f.recipe["prompt"].as_str().unwrap_or_default(), f.seed)))
+            .add_filter("PNG", &["png"])
+            .blocking_save_file();
+        let Some(picked) = picked else { return Ok(None) };
+        let dst = picked.into_path().map_err(|e| e.to_string())?;
+        std::fs::copy(&f.path, &dst).map_err(|e| format!("can't save to {}: {e}", dst.display()))?;
+        let dst = dst.to_string_lossy().to_string();
+        app.library.mark_saved(&id, &dst);
+        Ok(Some(dst))
+    })
+    .await
+}
+
+#[tauri::command]
+fn delete_frame(app: State<'_, Shared>, id: String) {
+    app.library.delete_frame(&id);
+}
+
+#[tauri::command]
+async fn pick_folder(handle: AppHandle, title: String) -> Result<Option<String>, String> {
+    blocking(move || {
+        Ok(handle.dialog().file().set_title(title).blocking_pick_folder().and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().to_string()))
+    })
+    .await
+}
+
+/// Show a saved file in the file manager.
+#[tauri::command]
+fn reveal(path: String) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(format!("/select,{path}")).spawn();
+    #[cfg(unix)]
+    {
+        let dir = Path::new(&path).parent().map(Path::to_path_buf).unwrap_or_default();
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
+}
+
+#[tauri::command]
+fn ui_error(app: State<'_, Shared>, message: String) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(app.dirs.logs.join("ui.log")) {
+        let _ = writeln!(f, "{} {message}", library::now_ms());
+    }
+}
+
+fn resources_dir(handle: &AppHandle) -> PathBuf {
+    let bundled = handle.path().resource_dir().unwrap_or_default();
+    if bundled.join("engines").join("diffusion_worker.py").is_file() {
+        return bundled;
+    }
+    // Running from the repo (cargo run / tauri dev): use the source folders.
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+}
+
+/// `latent --install <model>` downloads a model without opening the window (used for testing and scripting).
+fn cli_install(id: &str) -> ! {
+    // Same folders Tauri uses: %APPDATA% / %LOCALAPPDATA% on Windows, $XDG_DATA_HOME on Linux.
+    let (data, local) = if cfg!(windows) {
+        (std::env::var("APPDATA").unwrap_or_default(), std::env::var("LOCALAPPDATA").unwrap_or_default())
+    } else {
+        let d = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
+        (d.clone(), d)
     };
-
-    state.sources.lock().await.push(source);
-
-    Ok(source_to_json(&state.sources.lock().await.last().unwrap()).into())
-}
-
-#[tauri::command]
-async fn frame_to_source(
-    state: tauri::State<'_, AppState>,
-    frame_id: String,
-) -> Result<serde_json::Value, String> {
-    let index = state.frame_index.lock().await;
-    let frame = index
-        .frames
-        .iter()
-        .find(|f| f.id == frame_id)
-        .ok_or("Frame not found")?;
-
-    let cache_dir = frame_cache::cache_dir();
-    let id = uuid::Uuid::new_v4().to_string();
-    let thumb_path = cache_dir.join(format!("{}.src.thumb.png", id));
-
-    let source = frame_cache::Source {
-        id: id.clone(),
-        path: frame.path.clone(),
-        thumb: thumb_path,
-        width: frame.width,
-        height: frame.height,
-        name: format!("From frame {}", frame_id[..8].to_string()),
-        from_frame: Some(frame.id.clone()),
-    };
-
-    state.sources.lock().await.push(source.clone());
-
-    Ok(source_to_json(&source).into())
-}
-
-#[tauri::command]
-async fn delete_source(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
-    state.sources.lock().await.retain(|s| s.id != id);
-    Ok(())
-}
-
-// ── Tools ─────────────────────────────────────────────────────────
-
-#[tauri::command]
-async fn run_tool(
-    handle: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    tool: String,
-    input: serde_json::Value,
-    scale: Option<f64>,
-) -> Result<serde_json::Value, String> {
-    let batch_id = uuid::Uuid::new_v4().to_string();
-
-    // Determine which tool model to use
-    let tool_model = match tool.as_str() {
-        "upscale" => "real-esrgan",
-        "cutout" => "birefnet",
-        _ => return Err(format!("Unknown tool: {}", tool)),
-    };
-
-    let cache_dir = frame_cache::cache_dir();
-    let output_path = cache_dir.join(format!("{}.{}.png", batch_id, 0));
-
-    // For tools, we just signal the batch started
-    let _ = handle.emit(
-        "batch",
-        serde_json::json!({
-            "batch": batch_id,
-            "state": "running",
-        }),
-    );
-
-    // In phase 1, tools run through the worker or as separate processes.
-    // For now, return immediately with a placeholder batch.
-    // The actual tool execution would happen here.
-
-    Ok(serde_json::json!({
-        "batch": batch_id,
-        "tool": tool,
-    }))
-}
-
-// ── Frame Operations ──────────────────────────────────────────────
-
-#[tauri::command]
-async fn save_frame(
-    state: tauri::State<'_, AppState>,
-    frame_id: String,
-) -> Result<String, String> {
-    let mut index = state.frame_index.lock().await;
-
-    // Find the frame
-    let frame = index
-        .frames
-        .iter_mut()
-        .find(|f| f.id == frame_id)
-        .ok_or("Frame not found")?;
-
-    let s = state.settings.lock().await;
-    let save_folder = &s.save_folder;
-
-    // Generate filename from pattern
-    let now = chrono::Utc::now();
-    let filename = s
-        .filename_pattern
-        .replace("{date}", &now.format("%Y%m%d").to_string())
-        .replace("{time}", &now.format("%H%M%S").to_string())
-        .replace("{model}", &frame.model)
-        .replace("{seed}", &frame.seed.to_string())
-        .replace("{index}", &frame.index.to_string());
-
-    let extension = match s.save_format {
-        settings::SaveFormat::Png => "png",
-        settings::SaveFormat::Webp => "webp",
-        settings::SaveFormat::Jpeg => "jpg",
-    };
-
-    let save_path = save_folder.join(format!("{}.{}", filename, extension));
-
-    // Copy the frame to the save folder
-    if let Ok(_) = std::fs::copy(&frame.path, &save_path) {
-        frame.saved = Some(save_path.to_string_lossy().to_string());
-        frame_cache::save_index(&index).ok();
-        return Ok(save_path.to_string_lossy().to_string());
-    }
-
-    Err("Failed to save frame".to_string())
-}
-
-#[tauri::command]
-async fn save_frame_as(
-    handle: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    frame_id: String,
-) -> Result<Option<String>, String> {
-    // Open save dialog via shell
-    let frame = {
-        let index = state.frame_index.lock().await;
-        index
-            .frames
-            .iter()
-            .find(|f| f.id == frame_id)
-            .cloned()
-            .ok_or("Frame not found")?
-    };
-
-    use tauri_plugin_shell::ShellExt;
-    let result = handle
-        .file_dialog(
-            Some(tauri_plugin_shell::shell::FileDialogFilter::new("Images", &["png", "jpg", "jpeg"])),
-            Some("Save frame as"),
-        )
-        .map_err(|e| e.to_string())?;
-
-    if let Some(path) = result.as_ref() {
-        let mut index = state.frame_index.lock().await;
-        if let Some(f) = index.frames.iter_mut().find(|f| f.id == frame_id) {
-            std::fs::copy(&f.path, &path).ok();
-            f.saved = Some(path.to_string_lossy().to_string());
-            frame_cache::save_index(&index).ok();
-            return Ok(Some(path.to_string_lossy().to_string()));
+    let data = PathBuf::from(data).join("com.mazon.latent");
+    let logs = PathBuf::from(local).join("com.mazon.latent").join("logs");
+    let _ = std::fs::create_dir_all(&logs);
+    let settings: Settings = store::load(&data.join("settings.json"));
+    let device = hw::resolve_device(&settings.device, &hw::snapshot(&mut sysinfo::System::new()));
+    let result = models::find(id).and_then(|m| {
+        println!("installing {} for {device} into {}", m.name, settings.models_dir);
+        install::install(None, Path::new(&settings.models_dir), &logs, m, &device, &settings.hf_token)
+    });
+    match result {
+        Ok(()) => {
+            println!("installed {id}");
+            std::process::exit(0)
+        }
+        Err(e) => {
+            eprintln!("install failed: {e}");
+            std::process::exit(1)
         }
     }
-
-    Ok(None)
 }
-
-#[tauri::command]
-async fn delete_frame(
-    state: tauri::State<'_, AppState>,
-    frame_id: String,
-) -> Result<(), String> {
-    let mut index = state.frame_index.lock().await;
-    frame_cache::remove_frame(&mut index, &frame_id)?;
-
-    // Remove pending batch if empty
-    state
-        .pending_batches
-        .lock()
-        .await
-        .retain(|_, (_, _, _)| true);
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn reveal(path: String) -> Result<(), String> {
-    let p = std::path::Path::new(&path);
-    if let Some(parent) = p.parent() {
-        std::process::Command::new("explorer")
-            .arg(parent)
-            .spawn()
-            .ok();
-    }
-
-    // Fallback: just open the containing directory
-    let p = std::path::Path::new(&path);
-    if let Some(parent) = p.parent() {
-        #[cfg(windows)]
-        {
-            std::process::Command::new("explorer")
-                .arg("/select,")
-                .arg(p)
-                .spawn()
-                .ok();
-        }
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("open")
-                .arg("-R")
-                .arg(p)
-                .spawn()
-                .ok();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            std::process::Command::new("xdg-open")
-                .arg(parent)
-                .spawn()
-                .ok();
-        }
-    }
-
-    Ok(())
-}
-
-// ── Helpers ───────────────────────────────────────────────────────
-
-fn image_dimensions(path: &std::path::Path) -> Result<(usize, usize), String> {
-    let img = image::open(path).map_err(|e| e.to_string())?;
-    Ok((img.width() as usize, img.height() as usize))
-}
-
-fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD
-        .decode(s)
-        .map_err(|e| e.to_string())
-}
-
-// ── Entry Point ───────────────────────────────────────────────────
 
 fn main() {
-    // Initialize logging
-    env_logger::init();
-
-    // Detect hardware
-    let hw_info = hw::detect();
-    log::info!("Hardware detected: {:?}", hw_info);
-
-    // Load settings
-    let settings = settings::load();
-    log::info!("Settings loaded from {:?}", settings::settings_path());
-
-    // Load frame index
-    let frame_index = frame_cache::load_index();
-    log::info!("Frame index loaded: {} frames", frame_index.frames.len());
-
-    // Create event channel
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-    set_event_tx(event_tx);
-
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--install") {
+        cli_install(args.get(i + 1).map(String::as_str).unwrap_or(""));
+    }
+    // WebKitGTK's DMA-BUF renderer shows a blank window with NVIDIA's Linux driver on Wayland.
+    #[cfg(target_os = "linux")]
+    if Path::new("/proc/driver/nvidia").exists() && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_http::init())
-        .plugin(tauri_plugin_notification::init())
-        .setup(move |app| {
-            let handle = app.handle().clone();
-
-            // Spawn event forwarding task — reads from worker event channel,
-            // emits to Tauri UI via handle.emit().
-            let fwd_event_rx = event_rx;
-            tauri::async_runtime::spawn(async move {
-                while let Some(event_value) = fwd_event_rx.recv().await {
-                    // Determine event type and emit with the correct name
-                    if let Some(event_map) = event_value.as_object() {
-                        if let Some(event_name) = event_map.get("event").and_then(|e| e.as_str()) {
-                            let payload = event_value.clone();
-                            match event_name {
-                                "ready" => {
-                                    let _ = handle.emit("engine", payload);
-                                }
-                                "progress" => {
-                                    let _ = handle.emit("progress", payload);
-                                }
-                                "done" => {
-                                    let _ = handle.emit("frame", payload);
-                                    // Also emit batch completion if all frames done
-                                    let _ = handle.emit("batch", serde_json::json!({
-                                        "state": "done",
-                                        "frame_id": event_map.get("id").and_then(|i| i.as_str()).unwrap_or(""),
-                                    }));
-                                }
-                                "cancelled" => {
-                                    let _ = handle.emit("batch", serde_json::json!({
-                                        "state": "cancelled",
-                                        "frame_id": event_map.get("id").and_then(|i| i.as_str()).unwrap_or(""),
-                                    }));
-                                }
-                                "error" => {
-                                    let _ = handle.emit("batch", serde_json::json!({
-                                        "state": "failed",
-                                        "kind": event_map.get("kind").and_then(|k| k.as_str()).unwrap_or("unknown"),
-                                        "message": event_map.get("message").and_then(|m| m.as_str()).unwrap_or(""),
-                                    }));
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|tauri_app| {
+            let handle = tauri_app.handle().clone();
+            let data = handle.path().app_data_dir()?;
+            let local = handle.path().app_local_data_dir()?;
+            let dirs = Dirs { resources: resources_dir(&handle), logs: local.join("logs"), settings: data.join("settings.json") };
+            std::fs::create_dir_all(&dirs.logs)?;
+            let settings: Settings = store::load(&dirs.settings);
+            let library = Library::open(&data, local.join("frames"))?;
+            // Read the hardware once before the window asks, so models aren't judged against an empty GPU.
+            let mut sys = sysinfo::System::new();
+            let first = hw::snapshot(&mut sys);
+            let app: Shared = Arc::new(App {
+                dirs,
+                settings: Mutex::new(settings),
+                library,
+                engines: Arc::new(Manager::default()),
+                hw: Mutex::new(first),
             });
+            tauri_app.manage(app.clone());
 
-            // Store state
-            let app_state = AppState {
-                settings: Arc::new(Mutex::new(settings)),
-                hw_info,
-                worker: Arc::new(Mutex::new(None)),
-                frame_index: Arc::new(Mutex::new(frame_index)),
-                sources: Arc::new(Mutex::new(Vec::new())),
-                pending_batches: Arc::new(Mutex::new(HashMap::new())),
-                last_activity: Arc::new(Mutex::new(Instant::now())),
-            };
-
-            tokio::runtime::Handle::current().block_on(async {
-                app.manage(app_state);
+            // Hardware every 2 s, and the idle-unload check.
+            let h = handle.clone();
+            std::thread::spawn(move || loop {
+                let snap = hw::snapshot(&mut sys);
+                *app.hw.lock().unwrap() = snap.clone();
+                let minutes = app.settings.lock().unwrap().idle_minutes();
+                app.engines.idle_check(&h, minutes);
+                let _ = h.emit("hw", json!({
+                    "hw": snap,
+                    "resident": app.engines.resident(),
+                    "idleLeft": app.engines.idle_seconds_left(minutes),
+                }));
+                std::thread::sleep(Duration::from_secs(2));
             });
-
-            // Warm start if configured
-            if settings.warm_start {
-                let catalog = models::catalog();
-                if let Some(model) = catalog.first() {
-                    let default_variant = &model.default_variant;
-                    handle.emit("engine", serde_json::json!({
-                        "model": model.id,
-                        "variant": default_variant,
-                        "state": "loading",
-                    })).ok();
-
-                    // Defer preload until after the app is ready
-                    let h = handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        // Try to preload the default model
-                        let state: tauri::State<AppState> = h.state();
-                        let s = state.settings.lock().await;
-                        let compute = match s.compute_target {
-                            settings::ComputeTarget::Auto => "auto",
-                            settings::ComputeTarget::Gpu => "gpu",
-                            settings::ComputeTarget::Cpu => "cpu",
-                        };
-                        if model_is_installed(&s.models_folder, model) {
-                            if let Ok(worker) = worker::WorkerHandle::start(
-                                &model.id,
-                                default_variant,
-                                s.models_folder.to_str().unwrap_or(""),
-                                compute,
-                            ) {
-                                *state.worker.lock().await = Some(worker);
-                                *state.last_activity.lock().await = Instant::now();
-                                h.emit("engine", serde_json::json!({
-                                    "model": model.id,
-                                    "variant": default_variant,
-                                    "state": "warm",
-                                })).ok();
-                            }
-                        }
-                    });
-                }
-            }
-
-            // Spawn HW monitoring task
-            let hw_handle = handle.clone();
-            let hw_state = hw_info.clone();
-            tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-                loop {
-                    interval.tick().await;
-
-                    // Re-read GPU stats (on Windows via NVML)
-                    let hw = hw::detect();
-                    let payload = serde_json::json!({
-                        "device": hw.devices.first().map(|d| d.name.clone()).unwrap_or_else(|| "CPU".into()),
-                        "vram": if let Some(gpu) = hw.devices.iter().find(|d| d.vram_total_mb.is_some()) {
-                            serde_json::json!({
-                                "used": gpu.vram_used_mb,
-                                "total": gpu.vram_total_mb,
-                            })
-                        } else {
-                            serde_json::Value::Null
-                        },
-                        "ram": serde_json::json!({
-                            "used": hw.ram_used,
-                            "total": hw.ram_total,
-                        }),
-                    });
-
-                    let _ = hw_handle.emit("hw", payload);
-                }
-            });
-
-            // Spawn idle unload monitor
-            let idle_handle = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-                loop {
-                    interval.tick().await;
-
-                    let state: tauri::State<AppState> = idle_handle.state();
-                    let last = *state.last_activity.lock().await;
-                    let idle_secs = last.elapsed().as_secs();
-
-                    let s = state.settings.lock().await;
-                    if let settings::IdleUnload::Minutes(mins) = s.idle_unload_minutes {
-                        if idle_secs >= mins as u64 * 60 {
-                            log::info!("Idle unload triggered after {}s", idle_secs);
-                            if let Some(worker) = state.worker.lock().await.take() {
-                                worker.stop().ok();
-                            }
-                            idle_handle.emit("engine", serde_json::json!({
-                                "state": "cold",
-                            })).ok();
-                        }
-                    }
-                }
-            });
-
             Ok(())
         })
-        // ── Commands ──────────────────────────────────────────────
         .invoke_handler(tauri::generate_handler![
-            bootstrap,
-            save_settings,
-            models,
-            install_model,
-            remove_model,
-            preload,
-            unload,
-            generate,
-            cancel,
-            import_sources,
-            paste_source,
-            frame_to_source,
-            delete_source,
-            run_tool,
-            save_frame,
-            save_frame_as,
-            delete_frame,
-            reveal,
+            bootstrap, save_settings, install_model, remove_model, preload, unload, generate, cancel,
+            import_sources, paste_source, frame_to_source, delete_source, save_frame, save_frame_as, delete_frame,
+            pick_folder, reveal, ui_error
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Latent");
+        .build(tauri::generate_context!())
+        .expect("error while building Latent")
+        .run(|handle, event| {
+            if let RunEvent::Exit = event {
+                if let Some(app) = handle.try_state::<Shared>() {
+                    app.engines.unload(handle);
+                    app.library.clear_frames();
+                }
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_names_come_from_the_prompt() {
+        assert_eq!(file_stem("A lighthouse at dusk, wet stone, film grain", 41), "a-lighthouse-at-dusk-wet-41");
+        assert_eq!(file_stem("  ", 7), "latent-7");
+        assert_eq!(file_stem("../../etc/passwd", 3), "etc-passwd-3", "no path characters survive");
+    }
 }

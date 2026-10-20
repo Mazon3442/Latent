@@ -1,12 +1,8 @@
 # Python
 __pycache__/
 *.pyc
-*.pyo
 .venv/
 *-env/
-engines/.venv/
-pyproject.toml
-poetry.lock
 
 # Models and weights (huge, downloaded separately)
 models/
@@ -26,9 +22,7 @@ logs/
 
 # Rust / Tauri build output
 target/
-app/src-tauri/target/
 app/src-tauri/gen/
-app/src-tauri/icons/
 node_modules/
 
 # Local config / OS
@@ -36,7 +30,3 @@ node_modules/
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# Mockup-generated assets
-docs/assets/*.png
-docs/assets/*.jpg
