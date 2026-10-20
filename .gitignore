@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*-env/
+
+# Models and weights (huge, downloaded separately)
+models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+
+# Generated images, sources and logs (never commit people's photos)
+out/
+cache/
+frames/
+sources/
+logs/
+
+# Rust / Tauri build output
+target/
+app/src-tauri/gen/
+node_modules/
+
+# Local config / OS
+.env
+.DS_Store
+Thumbs.db
+desktop.ini

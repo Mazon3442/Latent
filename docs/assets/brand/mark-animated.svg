@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Latent">
+  <title>Latent</title>
+  <style>
+    .d { transform-box: fill-box; transform-origin: 50% 50%; animation: settle 4.2s cubic-bezier(.23,1,.32,1) infinite; }
+    .d1 { animation-delay: 0s; } .d2 { animation-delay: .14s; } .d3 { animation-delay: .28s; } .d4 { animation-delay: .42s; }
+    @keyframes settle {
+      0%   { transform: scale(1); }
+      10%  { transform: scale(.35); }
+      22%  { transform: scale(1.35); }
+      34%  { transform: scale(.8); }
+      48%  { transform: scale(1); }
+      100% { transform: scale(1); }
+    }
+    @media (prefers-reduced-motion: reduce) { .d { animation: none; } }
+  </style>
+    <circle cx="16.00" cy="16.00" r="10.00" fill="#ECEDE9"/>
+    <circle class="d d1" cx="40.00" cy="16.00" r="5.66" fill="#7A7C7F"/>
+    <circle class="d d2" cx="64.00" cy="16.00" r="3.92" fill="#7A7C7F"/>
+    <circle class="d d3" cx="88.00" cy="16.00" r="3.39" fill="#7A7C7F"/>
+    <circle class="d d4" cx="112.00" cy="16.00" r="1.82" fill="#7A7C7F"/>
+    <circle cx="16.00" cy="40.00" r="10.00" fill="#ECEDE9"/>
+    <circle class="d d1" cx="40.00" cy="40.00" r="6.12" fill="#7A7C7F"/>
+    <circle class="d d2" cx="64.00" cy="40.00" r="4.27" fill="#7A7C7F"/>
+    <circle class="d d3" cx="88.00" cy="40.00" r="2.71" fill="#7A7C7F"/>
+    <circle class="d d3" cx="112.00" cy="40.00" r="3.23" fill="#7A7C7F"/>
+    <circle cx="16.00" cy="64.00" r="10.00" fill="#ECEDE9"/>
+    <circle class="d d1" cx="40.00" cy="64.00" r="5.04" fill="#7A7C7F"/>
+    <circle class="d d2" cx="64.00" cy="64.00" r="4.38" fill="#7A7C7F"/>
+    <circle class="d d2" cx="88.00" cy="64.00" r="3.79" fill="#7A7C7F"/>
+    <circle class="d d2" cx="112.00" cy="64.00" r="3.83" fill="#7A7C7F"/>
+    <circle cx="16.00" cy="88.00" r="10.00" fill="#ECEDE9"/>
+    <circle class="d d1" cx="40.00" cy="88.00" r="7.00" fill="#FFAA2C"/>
+    <circle class="d d1" cx="64.00" cy="88.00" r="6.75" fill="#7A7C7F"/>
+    <circle class="d d1" cx="88.00" cy="88.00" r="5.23" fill="#7A7C7F"/>
+    <circle class="d d1" cx="112.00" cy="88.00" r="5.44" fill="#7A7C7F"/>
+    <circle cx="16.00" cy="112.00" r="10.00" fill="#ECEDE9"/>
+    <circle cx="40.00" cy="112.00" r="10.00" fill="#ECEDE9"/>
+    <circle cx="64.00" cy="112.00" r="10.00" fill="#ECEDE9"/>
+    <circle cx="88.00" cy="112.00" r="10.00" fill="#ECEDE9"/>
+    <circle cx="112.00" cy="112.00" r="10.00" fill="#ECEDE9"/>
+</svg>
