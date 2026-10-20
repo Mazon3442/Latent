@@ -14,8 +14,12 @@ use tauri::{AppHandle, Emitter};
 
 pub const ENV: &str = "diffusion-env";
 
-/// Pinned so an upgrade is a deliberate step: one diffusers release serves every model.
-const PACKAGES: &[&str] = &["diffusers==0.41.*", "transformers>=4.57", "accelerate", "safetensors", "pillow", "huggingface_hub"];
+/// Pinned so an upgrade is a deliberate step: one diffusers build serves every model. FLUX.3 klein's pipeline isn't in
+/// a release yet, so this is an exact commit of diffusers main (2026-10-20).
+const PACKAGES: &[&str] = &[
+    "diffusers @ git+https://github.com/huggingface/diffusers@de988b7ee77c393a63865d265d19e267ef9c7bf5",
+    "transformers>=4.57", "accelerate", "safetensors", "pillow", "huggingface_hub",
+];
 const TORCH: &str = "torch==2.11.*";
 
 pub fn python(home: &Path) -> PathBuf {

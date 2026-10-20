@@ -116,7 +116,7 @@ kbd { font: 500 11px/1 var(--ui); padding: 3px 5px; border-radius: var(--r-sm); 
 .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 
 /* ---------- regions, separated by tone ---------- */
-.main { display: grid; grid-template-columns: 260px minmax(0, 1fr) 340px; min-height: 0; }
+.main { display: grid; grid-template-columns: 260px minmax(0, 1fr) 400px; min-height: 0; }
 .col { min-height: 0; display: flex; flex-direction: column; }
 .col-sources, .col-frames { background: var(--surface); }
 .col-head { display: flex; align-items: baseline; justify-content: space-between; padding: 22px 22px 10px; gap: 12px; }
@@ -237,7 +237,7 @@ input.slider:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--s
 .take-path { font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
 .take-path button { color: inherit; text-decoration: underline; text-underline-offset: 3px; padding: 0; text-align: left; }
 .take-actions { display: flex; gap: 6px; margin-top: 2px; flex-wrap: wrap; }
-.take-actions .btn { white-space: nowrap; padding: 6px 10px; font-size: 13px; background: var(--surface-2); }
+.take-actions .btn { white-space: nowrap; padding: 5px 8px; font-size: 13px; background: var(--surface-2); }
 .take-actions [data-act="delete"] { margin-left: auto; }
 
 /* ---------- splash, as in Mimic ---------- */

@@ -38,14 +38,14 @@
 
 | Model | Does | Memory | License |
 | --- | --- | --- | --- |
-| **Z-Image Turbo** | generate, in 8 steps | 12–16 GB VRAM¹ | Apache 2.0 |
+| **Z-Image Turbo** | generate, in 9 steps, about 13 s per 1024 × 1024 frame | 14.2 GB VRAM peak · 10 GB RAM | Apache 2.0 |
 | **FLUX.2 [klein] 4B** | generate and edit, several reference images | 10–13 GB VRAM¹ | Apache 2.0 |
 | **Qwen-Image-Edit** | edit, strong on text and objects | 16 GB VRAM, quantized¹ | Apache 2.0 |
 | **SDXL 1.0** | generate, inpaint; runs on smaller GPUs | about 8 GB VRAM¹ | CreativeML OpenRAIL++-M |
 | **Real-ESRGAN** | upscale | under 1 GB | BSD-3-Clause |
 | **BiRefNet** | remove background | about 2 GB | MIT |
 
-<sub>¹ Published or estimated figures, not yet measured with Latent. They will be replaced with measurements from an RTX 5070 Ti and a 16-thread CPU before the first release. No model weights are included in Latent; each is downloaded on request and keeps its own license, which applies to what you make with it.</sub>
+<sub>Z-Image Turbo was measured with Latent on an RTX 5070 Ti (16 GB); on smaller GPUs Latent offloads it (12.3 GB VRAM, slower). ¹ Published or estimated figures, not yet measured with Latent. They will be replaced with measurements from an RTX 5070 Ti and a 16-thread CPU before the first release. No model weights are included in Latent; each is downloaded on request and keeps its own license, which applies to what you make with it.</sub>
 
 ## How it works
 

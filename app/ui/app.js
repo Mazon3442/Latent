@@ -38,8 +38,22 @@ const state = {
 
 const model = () => state.models.find(m => m.id === state.model);
 const installed = () => state.models.filter(m => m.installed);
-const variant = m => m.variants[0];
-const sizeFor = m => m.sizes.find(s => s.aspect === state.settings.aspect) || m.sizes[0];
+const variant = m => m.variants.find(v => v.id === m.recommended) || m.variants[0]; // the core picks; this mirrors it
+/** The size the next batch uses: for an edit, the model size closest to the first photo's shape; else the aspect picked. */
+function sizeFor(m) {
+  const src = m.can.edit && state.sources.find(s => s.id === state.attached[0]);
+  if (!src) return m.sizes.find(s => s.aspect === state.settings.aspect) || m.sizes[0];
+  const off = s => Math.abs(Math.log((s.width / s.height) / (src.width / src.height)));
+  return m.sizes.reduce((best, s) => (off(s) < off(best) ? s : best));
+}
+const MAX_REFS = 10;
+/** Click a source: models that take several references collect them; the others use one photo at a time. */
+function toggleSource(id) {
+  const multi = model()?.can.multiRef;
+  if (state.attached.includes(id)) state.attached = state.attached.filter(x => x !== id);
+  else state.attached = multi ? [...state.attached, id].slice(-MAX_REFS) : [id];
+  render();
+}
 const frame = id => state.frames.find(f => f.id === id);
 const unsaved = () => state.frames.filter(f => !f.saved).length;
 const modelName = id => state.models.find(m => m.id === id)?.name ?? id;
@@ -105,6 +119,7 @@ function renderMem() {
 function selectModel(id) {
   state.model = id;
   state.steps = null;
+  if (!model()?.can.multiRef) state.attached = state.attached.slice(0, 1);
   render();
   if (state.resident !== id && !state.run) invoke("preload", { model: id, variant: null }).catch(e => log(String(e), "err"));
 }
@@ -138,6 +153,7 @@ function renderComposer() {
   const photo = state.sources.find(s => s.id === state.attached[0]);
   const count = tok("count", plural(state.settings.count, "frame"));
   if (!m) $("#recipe").innerHTML = `Make it with ${tok("model", "…")}`;
+  else if (state.attached.length > 1) $("#recipe").innerHTML = `Combine ${tok("photo", `<img src="${fileSrc(photo.path)}" alt="">${state.attached.length} photos`)} with ${tok("model", esc(m.name))} · ${count}`;
   else if (photo) $("#recipe").innerHTML = `Edit ${tok("photo", `<img src="${fileSrc(photo.path)}" alt="">${esc(photo.name)}`)} with ${tok("model", esc(m.name))} · ${count}`;
   else $("#recipe").innerHTML = `Make it with ${tok("model", esc(m.name))} at ${tok("aspect", sizeFor(m).aspect)} · ${count}`;
   $("#controlsBtn .dot").hidden = state.steps === null && state.seed === "";
@@ -154,6 +170,11 @@ function preflight() {
   if (variant(m).fits === "no") return { block: true, warn: true, text: `${m.name} needs about ${gb(variant(m).vram)} GB, more than this PC has.` };
   if (state.error) return { error: true, text: state.error };
   if (!$("#prompt").value.trim()) return { block: true, text: "Write what to make." };
+  const hw = state.hw;
+  const free = hw && hw.vramTotal > 0 && state.device !== "cpu" ? hw.vramTotal - hw.vramUsed : null;
+  if (free !== null && state.resident !== m.id && free < variant(m).vram) {
+    return { warn: true, text: `Only ${gb(free)} GB of VRAM is free and ${m.name} needs about ${gb(variant(m).vram)} GB. Close other GPU apps (a local LLM server, a game) or it will run slowly.` };
+  }
   const s = sizeFor(m);
   const steps = state.steps ?? m.options.steps.default;
   const load = state.resident === m.id ? "loaded, starts now" : "loads first (about a minute)";
@@ -186,7 +207,7 @@ function menuHtml(kind) {
     `<button class="mi" data-aspect="${s.aspect}" aria-checked="${s.aspect === sizeFor(m).aspect}"><b>${s.aspect}<em>${s.width} × ${s.height}</em></b></button>`).join("");
   if (kind === "count") return `<p class="menu-title">Frames per batch</p>` + COUNTS.map(n =>
     `<button class="mi" data-count="${n}" aria-checked="${n === state.settings.count}"><b>${plural(n, "frame")}</b><span>${n === 1 ? "One at a time" : `Seeds in a row, so each frame differs`}</span></button>`).join("");
-  if (kind === "photo") return `<p class="menu-title">Photo to edit</p>` + state.sources.map(s =>
+  if (kind === "photo") return `<p class="menu-title">${m.can.multiRef ? `Photos to use (up to ${MAX_REFS})` : "Photo to edit"}</p>` + state.sources.map(s =>
     `<button class="mi" data-attach="${s.id}" aria-checked="${state.attached.includes(s.id)}"><b>${esc(s.name)}<em>${s.width} × ${s.height}</em></b></button>`).join("")
     + `<div class="menu-sep"></div><button class="mi" data-detach><b>No photo</b><span>Make a new image instead</span></button>`;
   return "";
@@ -399,7 +420,8 @@ function renderFrames() {
     const first = frames[0];
     const current = live ? state.follow : sel?.batch === batch;
     const name = modelName(first?.model ?? run?.model);
-    const shape = live ? run.aspect : `${first.width} × ${first.height}`;
+    const sized = state.models.find(x => x.id === first?.model)?.sizes.find(z => z.width === first.width && z.height === first.height);
+    const shape = live ? run.aspect : sized?.aspect ?? `${first.width} × ${first.height}`;
     const dur = live
       ? `<span class="take-dur live">developing</span>`
       : `<span class="take-dur">${(frames.reduce((a, f) => a + f.elapsed, 0) / frames.length).toFixed(1)} s each</span>`;
@@ -590,7 +612,7 @@ $("#menu").addEventListener("click", e => {
   if (b.dataset.pickModel) return selectModel(b.dataset.pickModel);
   if (b.dataset.aspect) { state.settings.aspect = b.dataset.aspect; saveSettings(); return renderComposer(); }
   if (b.dataset.count) { state.settings.count = Number(b.dataset.count); saveSettings(); return renderComposer(); }
-  if (b.dataset.attach) { state.attached = [b.dataset.attach]; return render(); }
+  if (b.dataset.attach) return toggleSource(b.dataset.attach);
   if (b.dataset.detach !== undefined) { state.attached = []; return render(); }
   if (b.dataset.openModels !== undefined) { openDialog("#modelsDlg"); return renderModels(); }
 });
@@ -627,11 +649,7 @@ document.addEventListener("click", async e => {
     if (dir) { state.settings[t.dataset.folder] = dir; saveSettings(); renderSettings(); }
     return;
   }
-  if (t.dataset.source) {
-    const id = t.dataset.source;
-    state.attached = state.attached.includes(id) ? [] : [id];
-    return render();
-  }
+  if (t.dataset.source) return toggleSource(t.dataset.source);
   if (t.dataset.frame) return select(t.dataset.frame);
   if (t.dataset.developing !== undefined) { state.follow = true; renderFrames(); return renderCanvas(); }
   if (t.dataset.reset === "steps") { state.steps = null; renderControls(); return renderComposer(); }
@@ -744,7 +762,7 @@ listen("engine", ({ payload: p }) => {
   if (p.state === "warm" || p.state === "busy") state.resident = p.model;
   if (p.state === "cold" && state.resident === p.model) state.resident = null;
   if (p.state === "loading") log(`Loading ${modelName(p.model)}…`);
-  if (p.state === "warm" && !state.run) log(`${modelName(p.model)} is loaded.`);
+  if (p.state === "warm") log(state.run ? `${modelName(p.model)} is loaded. Developing…` : `${modelName(p.model)} is loaded.`);
   if (p.message) log(p.message, "err");
   renderTop();
   renderPreflight();

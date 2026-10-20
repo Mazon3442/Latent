@@ -267,7 +267,7 @@ real peak the first time a model loads, as Mimic does.
 
 | Model | Does | Size | Memory (estimate) | License | Tier |
 | --- | --- | --- | --- | --- | --- |
-| **Z-Image Turbo** | generate | 6B, 8 steps | ~12-16 GB bf16; less quantized | Apache 2.0 | default on 16 GB |
+| **Z-Image Turbo** | generate | 6B, 9 steps | **measured:** 14.2 GB VRAM peak, ~13 s per 1024² frame, text encoder on the CPU (4 s per new prompt, cached); fully offloaded 12.3 GB but ~30 s per frame and 20 GB of RAM | Apache 2.0 | built, default on 16 GB |
 | **FLUX.2 [klein] 4B** | generate, edit, multi-reference | 4B | ~8-13 GB | Apache 2.0 | default editor, 12 GB+ |
 | **Qwen-Image-Edit** | edit (strong on text and objects) | 20B | 20 GB+ bf16; fits 16 GB only quantized + offloaded | Apache 2.0 | 16 GB, quantized |
 | **SDXL 1.0** (+ community checkpoints, phase 3) | generate, inpaint | 3.5B | ~7-8 GB; CPU possible but slow | CreativeML OpenRAIL++-M | 8 GB GPUs, CPU |

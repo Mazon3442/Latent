@@ -113,7 +113,7 @@ impl Manager {
         ];
         envs.extend(paths.device_env.iter().map(|(k, v)| (k.as_str(), v.clone())));
         let dir = install::model_dir(&paths.home, m).to_string_lossy().to_string();
-        let offload = m.variant(Some(variant)).offload;
+        let offload = m.variants.iter().find(|v| v.id == variant).map(|v| v.offload).unwrap_or(m.variants[0].offload);
         Worker::start(
             &install::python(&paths.home),
             &paths.workers.join("diffusion_worker.py"),
@@ -178,7 +178,7 @@ impl Manager {
             Ok(m) => m,
             Err(e) => return self.release(|| finish("failed", Some(json!({ "kind": "input", "message": e })))),
         };
-        let variant = m.variant(req.variant.as_deref());
+        let variant = m.variants.iter().find(|v| Some(v.id) == req.variant.as_deref()).unwrap_or(&m.variants[0]);
         let mut slot = self.slot.lock().unwrap();
         if let Err(e) = self.ensure(app, paths, &mut slot, m, variant.id) {
             drop(slot);

@@ -55,15 +55,17 @@ impl App {
         hw::resolve_device(&setting, &hw)
     }
 
-    /// The catalog with what this PC has: installed or not, and whether each variant fits.
+    /// The variant of `m` to run: the one asked for, or the fastest that fits this PC.
+    fn variant(&self, m: &models::Model, id: Option<&str>) -> &'static models::Variant {
+        let hw = self.hw.lock().unwrap().clone();
+        m.variant(id, self.device() != "cpu", hw.vram_total, hw.ram_total)
+    }
+
+    /// The catalog with what this PC has: installed or not, whether each variant fits, and which one runs.
     fn models(&self) -> Value {
         let home = PathBuf::from(&self.settings.lock().unwrap().models_dir);
         let hw = self.hw.lock().unwrap().clone();
         let on_gpu = self.device() != "cpu";
-        let fits = |need_vram: f64, need_ram: f64| {
-            let (need, have) = if on_gpu { (need_vram, hw.vram_total) } else { (need_ram, hw.ram_total) };
-            if have <= 0.0 || need <= have - 1.0 { "yes" } else if need <= have { "tight" } else { "no" }
-        };
         models::CATALOG
             .iter()
             .map(|m| {
@@ -71,8 +73,9 @@ impl App {
                 v["installed"] = install::is_installed(&home, m).into();
                 v["sizes"] = m.sizes.iter().map(|(a, w, h)| json!({ "aspect": a, "width": w, "height": h })).collect();
                 for (j, variant) in m.variants.iter().enumerate() {
-                    v["variants"][j]["fits"] = fits(variant.vram, variant.ram).into();
+                    v["variants"][j]["fits"] = models::fits(variant, on_gpu, hw.vram_total, hw.ram_total).into();
                 }
+                v["recommended"] = self.variant(m, None).id.into();
                 v
             })
             .collect()
@@ -152,7 +155,7 @@ async fn preload(handle: AppHandle, app: State<'_, Shared>, model: String, varia
     let app = app.inner().clone();
     blocking(move || {
         let m = models::find(&model)?;
-        app.engines.preload(&handle, &app.paths(), m, m.variant(variant.as_deref()).id)
+        app.engines.preload(&handle, &app.paths(), m, app.variant(m, variant.as_deref()).id)
     })
     .await
 }
@@ -169,9 +172,10 @@ async fn unload(handle: AppHandle, app: State<'_, Shared>) -> Result<(), String>
 
 /// Starts a batch and returns its id at once; frames arrive as events.
 #[tauri::command]
-fn generate(handle: AppHandle, app: State<'_, Shared>, request: GenRequest) -> Result<Value, String> {
+fn generate(handle: AppHandle, app: State<'_, Shared>, mut request: GenRequest) -> Result<Value, String> {
     let m = models::find(&request.model)?;
     request.check(m)?;
+    request.variant = Some(app.variant(m, request.variant.as_deref()).id.to_string());
     let sources = request.sources.iter().map(|id| app.library.source(id).map(|s| s.path)).collect::<Result<Vec<_>, _>>()?;
     if !app.engines.claim() {
         return Err("Still developing the last batch. Esc cancels it.".into());
