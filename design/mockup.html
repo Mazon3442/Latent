@@ -1,0 +1,584 @@
+/**
+ * Latent Phase 0 Mockup
+ * Clickable mockup showing the main screen in both themes.
+ * Every state reachable from a debug menu.
+ *
+ * Place at design/mockup.html.
+ * Open in a browser — no server needed.
+ *
+ * Depends on app/ui/css/app.css and app/ui/js/app.js.
+ * Uses mock.js for fake backend.
+ */
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Latent — Phase 0 Mockup</title>
+<link rel="stylesheet" href="../app/ui/css/app.css">
+<style>
+  /* ── Debug overlay ─────────────────────────────────────────── */
+  #debugBar {
+    position: fixed;
+    bottom: 32px;
+    right: 16px;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    background: var(--tile);
+    border: 1px solid var(--tile2);
+    border-radius: var(--radius-lg);
+    padding: 8px;
+    font-size: var(--font-size-xs);
+    max-height: calc(100vh - 64px);
+    overflow-y: auto;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    min-width: 200px;
+  }
+  #debugBar .dbg-section {
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--tile2);
+  }
+  #debugBar .dbg-section:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+  #debugBar .dbg-section-title {
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.06em;
+  }
+  #debugBar button {
+    display: block;
+    width: 100%;
+    padding: 4px 8px;
+    margin-bottom: 2px;
+    background: var(--ground);
+    border: 1px solid var(--tile2);
+    border-radius: var(--radius);
+    color: var(--ink2);
+    font-family: var(--font-ui);
+    font-size: var(--font-size-xs);
+    cursor: pointer;
+    text-align: left;
+  }
+  #debugBar button:hover {
+    background: var(--tile2);
+    color: var(--ink);
+  }
+  #debugBar button:active {
+    background: var(--accent);
+    color: #111;
+  }
+  #debugBar button.active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* Toggle debug bar visibility */
+  #debugToggle {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    z-index: 10000;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #111;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: bold;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  }
+  #debugToggle:hover { background: var(--accent2); }
+
+  /* Theme toggle in debug */
+  .theme-dark-btn, .theme-light-btn {
+    font-weight: 600;
+  }
+</style>
+</head>
+<body>
+
+<!-- ── top bar ──────────────────────────────────────────────────────── -->
+<header class="topbar" id="topbar">
+  <div class="topbar-brand">
+    <svg class="topbar-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="22" height="22" aria-label="Latent">
+      <circle cx="32" cy="32" r="10" fill="var(--ink)"/>
+      <circle cx="56" cy="32" r="10" fill="var(--ink)"/>
+      <circle cx="80" cy="32" r="10" fill="var(--ink)"/>
+      <circle cx="104" cy="32" r="10" fill="var(--ink)"/>
+      <circle cx="32" cy="56" r="10" fill="var(--ink)"/>
+      <circle cx="56" cy="56" r="6.2" fill="var(--ink)"/>
+      <circle cx="80" cy="56" r="6.2" fill="var(--noise)"/>
+      <circle cx="104" cy="56" r="6.2" fill="var(--noise)"/>
+      <circle cx="32" cy="80" r="10" fill="var(--ink)"/>
+      <circle cx="56" cy="80" r="4.6" fill="var(--noise)"/>
+      <circle cx="80" cy="80" r="4.6" fill="var(--accent)"/>
+      <circle cx="104" cy="80" r="4.6" fill="var(--noise)"/>
+      <circle cx="32" cy="104" r="10" fill="var(--ink)"/>
+      <circle cx="56" cy="104" r="3.3" fill="var(--noise)"/>
+      <circle cx="80" cy="104" r="3.3" fill="var(--noise)"/>
+      <circle cx="104" cy="104" r="3.3" fill="var(--noise)"/>
+    </svg>
+    <span class="topbar-title">Latent</span>
+  </div>
+
+  <div class="topbar-bar">
+    <div class="memory-track">
+      <div class="memory-fill" id="memoryFill" style="width:0%"></div>
+    </div>
+    <span class="memory-label" id="memoryLabel">no GPU</span>
+  </div>
+
+  <div class="topbar-models">
+    <div class="model-pill active warm">
+      <span class="pill-name">FLUX.2 [klein]</span>
+      <span class="pill-state">✓</span>
+    </div>
+  </div>
+
+  <div class="topbar-actions">
+    <button class="btn-icon" id="btnModels" title="Models (Ctrl+M)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+    </button>
+    <button class="btn-icon" id="btnSettings" title="Settings (Ctrl+,)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M12 1v4m0 14v4m-9.5-9.5h4m14 0h4m-2.8-7.2-2.8 2.8m-8.4 8.4-2.8 2.8m0-14 2.8 2.8m8.4 8.4 2.8 2.8"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ── main three-column layout ────────────────────────────────────── -->
+<main class="workspace">
+
+  <!-- SOURCES panel -->
+  <aside class="panel sources">
+    <div class="panel-header">
+      <span class="panel-title">SOURCES</span>
+      <span class="panel-count">2</span>
+    </div>
+    <div class="panel-body">
+      <div class="source-tile selected">
+        <img class="source-thumb" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='36' height='36'%3E%3Crect fill='%23333' width='36' height='36'/%3E%3Ctext x='18' y='22' text-anchor='middle' fill='%23888' font-size='10'%3E🖼%3C/text%3E%3C/svg%3E" alt="">
+        <div class="source-info">
+          <span class="source-name">portrait_ref.png</span>
+          <span class="source-meta">1024×1024</span>
+        </div>
+        <button class="source-delete">×</button>
+      </div>
+      <div class="source-tile">
+        <img class="source-thumb" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='36' height='36'%3E%3Crect fill='%23444' width='36' height='36'/%3E%3Ctext x='18' y='22' text-anchor='middle' fill='%23999' font-size='10'%3E🖼%3C/text%3E%3C/svg%3E" alt="">
+        <div class="source-info">
+          <span class="source-name">texture_sample.jpg</span>
+          <span class="source-meta">2048×1536</span>
+        </div>
+        <button class="source-delete">×</button>
+      </div>
+    </div>
+    <div class="panel-footer">
+      <div class="drop-zone">
+        <span class="drop-text">Drop, paste, or import photos</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- CANVAS area -->
+  <section class="canvas-area">
+    <div class="canvas">
+      <div class="canvas-placeholder" id="canvasPlaceholder">
+        <svg class="canvas-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="48" height="48" aria-hidden="true">
+          <circle cx="32" cy="32" r="10" fill="var(--ink)" opacity="0.3"/>
+          <circle cx="56" cy="32" r="10" fill="var(--ink)" opacity="0.3"/>
+          <circle cx="80" cy="32" r="10" fill="var(--ink)" opacity="0.3"/>
+          <circle cx="104" cy="32" r="10" fill="var(--ink)" opacity="0.3"/>
+          <circle cx="32" cy="56" r="10" fill="var(--ink)" opacity="0.3"/>
+          <circle cx="56" cy="56" r="6.2" fill="var(--ink)" opacity="0.3"/>
+          <circle cx="80" cy="56" r="6.2" fill="var(--noise)" opacity="0.3"/>
+          <circle cx="104" cy="56" r="6.2" fill="var(--noise)" opacity="0.3"/>
+          <circle cx="32" cy="80" r="10" fill="var(--ink)" opacity="0.3"/>
+          <circle cx="56" cy="80" r="4.6" fill="var(--noise)" opacity="0.3"/>
+          <circle cx="80" cy="80" r="4.6" fill="var(--accent)" opacity="0.3"/>
+          <circle cx="104" cy="80" r="4.6" fill="var(--noise)" opacity="0.3"/>
+          <circle cx="32" cy="104" r="10" fill="var(--ink)" opacity="0.3"/>
+          <circle cx="56" cy="104" r="3.3" fill="var(--noise)" opacity="0.3"/>
+          <circle cx="80" cy="104" r="3.3" fill="var(--noise)" opacity="0.3"/>
+          <circle cx="104" cy="104" r="3.3" fill="var(--noise)" opacity="0.3"/>
+        </svg>
+        <span class="canvas-placeholder-text">Your image will appear here</span>
+      </div>
+      <div class="canvas-content hidden" id="canvasContent">
+        <img class="canvas-image" id="canvasImage" alt="" draggable="false">
+        <div class="canvas-overlay hidden" id="canvasOverlay">
+          <div class="canvas-step-info">
+            <span class="step-text" id="stepText"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- prompt -->
+    <div class="prompt-area">
+      <textarea class="prompt-input" placeholder="Describe what to make or change…" rows="1"></textarea>
+      <div class="prompt-meta">
+        <span class="source-label">📎 portrait_ref.png <span class="remove-source">×</span></span>
+        <div class="size-chips">
+          <button class="size-chip active">512×512</button>
+          <button class="size-chip">1024×1024</button>
+          <button class="size-chip">1152×896</button>
+          <button class="size-chip">1216×832</button>
+        </div>
+        <span class="size-detail">1024 × 1024</span>
+        <span class="seed-display">seed: random</span>
+        <button class="btn-link" id="btnOptions">Options</button>
+        <button class="btn-link" id="btnSave" style="display:none">Save</button>
+        <button class="btn-link" id="btnUseSource" style="display:none">Use as source</button>
+      </div>
+      <div class="prompt-actions">
+        <button class="btn btn-primary">
+          <span>Generate</span>
+          <span class="btn-shortcut">Ctrl Enter</span>
+        </button>
+        <button class="btn btn-secondary hidden">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          <span>Cancel</span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- FRAMES panel -->
+  <aside class="panel frames">
+    <div class="panel-header">
+      <span class="panel-title">FRAMES</span>
+      <span class="panel-count">0</span>
+      <span class="unsaved-badge" style="display:none">0</span>
+    </div>
+    <div class="panel-body">
+      <span class="frames-hint">Frames appear after generation</span>
+    </div>
+    <div class="panel-footer">
+    </div>
+  </aside>
+
+</main>
+
+<!-- ── status bar ──────────────────────────────────────────────────── -->
+<footer class="statusbar">
+  <span class="status-status">Ready</span>
+  <span class="status-detail"></span>
+  <span class="status-unload">flux2-klein-4b (bf16)</span>
+</footer>
+
+<!-- ── settings drawer ─────────────────────────────────────────────── -->
+<div class="drawer-overlay hidden" id="settingsOverlay">
+  <div class="settings-drawer">
+    <div class="drawer-header">
+      <span class="drawer-title">Settings</span>
+      <button class="btn-icon" title="Close">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="settings-body">
+      <div class="settings-section">
+        <h3>Appearance</h3>
+        <div class="setting-row">
+          <label>Theme</label>
+          <select>
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+            <option value="system">System</option>
+          </select>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3>Saving</h3>
+        <div class="setting-row">
+          <label>Save folder</label>
+          <input type="text" value="C:\Users\mason\Pictures\Latent" readonly>
+        </div>
+        <div class="setting-row">
+          <label>Format</label>
+          <select>
+            <option value="png">PNG</option>
+            <option value="webp">WebP</option>
+            <option value="jpeg">JPEG</option>
+          </select>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3>Models and memory</h3>
+        <div class="setting-row">
+          <label>Models folder</label>
+          <input type="text" value="C:\Users\mason\.local\latent\models" readonly>
+        </div>
+        <div class="setting-row">
+          <label>Idle unload</label>
+          <select>
+            <option value="5">5 minutes</option>
+            <option value="10" selected>10 minutes</option>
+            <option value="30">30 minutes</option>
+            <option value="never">Never</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <label>Run models on</label>
+          <select>
+            <option value="auto">Automatic</option>
+            <option value="gpu">GPU</option>
+            <option value="cpu">CPU</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── debug bar ───────────────────────────────────────────────────── -->
+<button id="debugToggle">⚙</button>
+<div id="debugBar" style="display:none">
+  <div class="dbg-section">
+    <div class="dbg-section-title">Theme</div>
+    <button class="theme-dark-btn" onclick="setMockTheme('dark')">Dark</button>
+    <button class="theme-light-btn" onclick="setMockTheme('light')">Light</button>
+  </div>
+  <div class="dbg-section">
+    <div class="dbg-section-title">Engine State</div>
+    <button onclick="setEngineState('cold')">Cold</button>
+    <button onclick="setEngineState('loading')">Loading…</button>
+    <button onclick="setEngineState('warm')">Warm</button>
+    <button onclick="setEngineState('busy')">Busy</button>
+    <button onclick="setEngineState('unloading')">Unloading</button>
+    <button onclick="setEngineState('crashed')">Crashed</button>
+  </div>
+  <div class="dbg-section">
+    <div class="dbg-section-title">Canvas</div>
+    <button onclick="showCanvasPlaceholder()">Empty</button>
+    <button onclick="showGeneratedImage()">Generated Image</button>
+    <button onclick="showDevelopingImage()">Developing (step 3/8)</button>
+  </div>
+  <div class="dbg-section">
+    <div class="dbg-section-title">Frames Panel</div>
+    <button onclick="showEmptyFrames()">No Frames</button>
+    <button onclick="showDoneFrames()">Done Frames</button>
+    <button onclick="showDevelopingFrames()">Developing Frames</button>
+    <button onclick="showFailedFrames()">Failed Frames</button>
+  </div>
+  <div class="dbg-section">
+    <div class="dbg-section-title">Status Bar</div>
+    <button onclick="setStatus('Ready','')">Ready</button>
+    <button onclick="setStatus('Generating…','developing')">Developing</button>
+    <button onclick="setStatus('OOM — try lower res','error')">OOM Error</button>
+  </div>
+  <div class="dbg-section">
+    <div class="dbg-section-title">Memory</div>
+    <button onclick="setMemory(20)">20% VRAM</button>
+    <button onclick="setMemory(60)">60% VRAM</button>
+    <button onclick="setMemory(90)">90% VRAM</button>
+  </div>
+</div>
+
+<script>
+// ── Mock state ──────────────────────────────────────────────────────
+
+function setMockTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+}
+
+function setEngineState(state) {
+  const el = document.querySelector(".model-pill");
+  el.className = "model-pill active " + state;
+
+  const statusEl = document.querySelector(".status-status");
+  statusEl.textContent = state.charAt(0).toUpperCase() + state.slice(1);
+
+  const unloadEl = document.querySelector(".status-unload");
+  unloadEl.textContent = state === "cold" ? "" : "flux2-klein-4b (bf16)";
+}
+
+function showCanvasPlaceholder() {
+  document.getElementById("canvasPlaceholder").classList.remove("hidden");
+  document.getElementById("canvasContent").classList.add("hidden");
+  document.getElementById("canvasOverlay").classList.add("hidden");
+  document.getElementById("btnSave").style.display = "none";
+  document.getElementById("btnUseSource").style.display = "none";
+}
+
+function showGeneratedImage() {
+  document.getElementById("canvasPlaceholder").classList.add("hidden");
+  document.getElementById("canvasContent").classList.remove("hidden");
+  document.getElementById("canvasOverlay").classList.add("hidden");
+  document.getElementById("btnSave").style.display = "inline";
+  document.getElementById("btnUseSource").style.display = "inline";
+
+  // Generate a nice mock image
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 512;
+  const ctx = canvas.getContext("2d");
+
+  // Sky gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, 512);
+  grad.addColorStop(0, "#1a0a2e");
+  grad.addColorStop(0.4, "#16213e");
+  grad.addColorStop(0.7, "#e94560");
+  grad.addColorStop(1, "#ff6b35");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 512, 512);
+
+  // Sun
+  ctx.beginPath();
+  ctx.arc(256, 200, 60, 0, Math.PI * 2);
+  const sunGrad = ctx.createRadialGradient(256, 200, 10, 256, 200, 60);
+  sunGrad.addColorStop(0, "#fff7a1");
+  sunGrad.addColorStop(0.5, "#ff6b35");
+  sunGrad.addColorStop(1, "rgba(255,107,53,0)");
+  ctx.fillStyle = sunGrad;
+  ctx.fill();
+
+  // Mountains
+  ctx.fillStyle = "#0f0c29";
+  ctx.beginPath();
+  ctx.moveTo(0, 350);
+  ctx.lineTo(128, 280);
+  ctx.lineTo(256, 320);
+  ctx.lineTo(384, 260);
+  ctx.lineTo(512, 310);
+  ctx.lineTo(512, 512);
+  ctx.lineTo(0, 512);
+  ctx.fill();
+
+  const img = document.getElementById("canvasImage");
+  img.src = canvas.toDataURL("image/png");
+}
+
+function showDevelopingImage() {
+  showGeneratedImage();
+  document.getElementById("canvasOverlay").classList.remove("hidden");
+  document.getElementById("stepText").textContent = "3 / 8 steps";
+}
+
+function showEmptyFrames() {
+  const body = document.querySelector(".panel.frames .panel-body");
+  body.innerHTML = '<span class="frames-hint">Frames appear after generation</span>';
+  document.querySelector(".panel-count").textContent = "0";
+  document.getElementById("unsavedBadge").style.display = "none";
+}
+
+function showDoneFrames() {
+  const body = document.querySelector(".panel.frames .panel-body");
+  body.innerHTML = `
+    <div class="frames-batch">
+      <div class="batch-header">
+        <span class="batch-model">FLUX.2 [klein] 4B</span>
+        <span class="batch-status done">done</span>
+      </div>
+      <div class="frames-grid">
+        <div class="frame-tile">
+          <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%231a0a2e'/%3E%3Cstop offset='1' stop-color='%23ff6b35'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect fill='url(%23g)' width='128' height='128'/%3E%3Ctext x='64' y='72' text-anchor='middle' fill='%23fff' font-size='14'%3E1024×1024%3C/text%3E%3C/svg%3E" alt="">
+        </div>
+        <div class="frame-tile">
+          <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230f0c29'/%3E%3Cstop offset='1' stop-color='%23e94560'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect fill='url(%23g)' width='128' height='128'/%3E%3Ctext x='64' y='72' text-anchor='middle' fill='%23fff' font-size='14'%3E1024×1024%3C/text%3E%3C/svg%3E" alt="">
+        </div>
+      </div>
+    </div>
+  `;
+  document.querySelector(".panel-count").textContent = "2";
+  document.getElementById("unsavedBadge").style.display = "inline";
+  document.getElementById("unsavedBadge").textContent = "2";
+}
+
+function showDevelopingFrames() {
+  const body = document.querySelector(".panel.frames .panel-body");
+  body.innerHTML = `
+    <div class="frames-batch">
+      <div class="batch-header">
+        <span class="batch-model">FLUX.2 [klein] 4B</span>
+        <span class="batch-status running">running...</span>
+      </div>
+      <div class="frames-grid">
+        <div class="frame-tile developing">
+          <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Crect fill='%231a1a2e' width='128' height='128'/%3E%3Ctext x='64' y='72' text-anchor='middle' fill='%23ffaa2c' font-size='10'%3E…%3C/text%3E%3C/svg%3E" alt="">
+          <span class="frame-step-badge">3/8</span>
+        </div>
+      </div>
+    </div>
+  `;
+  document.querySelector(".panel-count").textContent = "1";
+  document.getElementById("unsavedBadge").style.display = "inline";
+  document.getElementById("unsavedBadge").textContent = "1";
+}
+
+function showFailedFrames() {
+  const body = document.querySelector(".panel.frames .panel-body");
+  body.innerHTML = `
+    <div class="frames-batch">
+      <div class="batch-header">
+        <span class="batch-model">Z-Image Turbo</span>
+        <span class="batch-status failed">failed: CUDA out of memory</span>
+      </div>
+      <div class="frames-grid">
+        <div class="frame-tile failed">
+          <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Crect fill='%23222' width='128' height='128'/%3E%3C/svg%3E" alt="">
+        </div>
+      </div>
+    </div>
+  `;
+  document.querySelector(".panel-count").textContent = "1";
+  document.getElementById("unsavedBadge").style.display = "inline";
+  document.getElementById("unsavedBadge").textContent = "1";
+}
+
+function setStatus(text, cls) {
+  const el = document.querySelector(".status-status");
+  el.textContent = text;
+  el.className = "status-status" + (cls ? " " + cls : "");
+}
+
+function setMemory(pct) {
+  const fill = document.getElementById("memoryFill");
+  fill.style.width = pct + "%";
+  fill.classList.toggle("warning", pct > 85);
+
+  const label = document.getElementById("memoryLabel");
+  const used = (pct / 100 * 16).toFixed(1);
+  label.textContent = `${used} / 16.0 GB`;
+}
+
+// Debug toggle
+document.getElementById("debugToggle").addEventListener("click", () => {
+  const bar = document.getElementById("debugBar");
+  bar.style.display = bar.style.display === "none" ? "flex" : "none";
+});
+
+// Open/close settings
+document.getElementById("btnSettings").addEventListener("click", () => {
+  document.getElementById("settingsOverlay").classList.remove("hidden");
+});
+document.querySelector(".settings-drawer .btn-icon").addEventListener("click", () => {
+  document.getElementById("settingsOverlay").classList.add("hidden");
+});
+document.getElementById("settingsOverlay").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("settingsOverlay")) {
+    document.getElementById("settingsOverlay").classList.add("hidden");
+  }
+});
+
+// Size chip interactivity
+document.querySelectorAll(".size-chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    document.querySelectorAll(".size-chip").forEach((c) => c.classList.remove("active"));
+    chip.classList.add("active");
+  });
+});
+</script>
+
+</body>
+</html>
