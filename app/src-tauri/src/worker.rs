@@ -64,8 +64,9 @@ pub fn kill_tree(child: &mut Child) {
 
 /// Every child process Latent starts goes through here.
 /// Windows: no console window. Linux and macOS: its own process group (so `kill_tree` gets its children too).
-/// Linux also sets a death signal, so it dies with Latent even if Latent crashes. macOS has no death signal; a
-/// model worker there still exits when Latent's end of its stdin closes, which happens when Latent exits or crashes.
+/// Linux also sets a death signal, so it dies with Latent even if Latent crashes. macOS has no death signal; the
+/// worker exits by itself as soon as Latent's end of its stdin closes (see diffusion_worker.py), which happens
+/// when Latent exits or crashes.
 pub fn hidden(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW

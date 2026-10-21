@@ -184,7 +184,7 @@ engines/                the Python worker that runs the diffusion models
 design/brand.py         draws the logo, banners and charts in docs/assets
 docs/                   the plan (docs/PLAN.md) and README assets
 packaging/arch/         PKGBUILD
-.github/workflows/      the release build (tag v*.*.* to publish) and the per-distro Linux check
+.github/workflows/      the release build (tag v*.*.* to publish) and the build check on every platform
 ```
 
 </details>

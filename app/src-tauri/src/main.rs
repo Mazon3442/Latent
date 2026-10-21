@@ -129,7 +129,9 @@ async fn install_model(handle: AppHandle, app: State<'_, Shared>, id: String) ->
             (PathBuf::from(&s.models_dir), s.hf_token.clone())
         };
         install::install(Some(&handle), &home, &app.dirs.logs, m, &app.device(), &token).inspect_err(|e| {
-            let _ = handle.emit("install", json!({ "id": id, "phase": "failed", "label": e }));
+            // If uv is what's missing, hand the interface the command to copy for this platform.
+            let command = (!install::uv_available()).then(install::uv_install_command);
+            let _ = handle.emit("install", json!({ "id": id, "phase": "failed", "label": e, "command": command }));
         })?;
         Ok(app.models())
     })
@@ -259,15 +261,20 @@ fn unique(dir: &Path, stem: &str, ext: &str) -> PathBuf {
 /// PNG is copied as it is, so the recipe and the AI-generated mark in it are kept. JPEG is re-encoded: smaller, but it
 /// has no place for them.
 fn export(src: &str, dst: &Path) -> Result<(), String> {
-    let jpeg = dst.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
-    if !jpeg {
-        return std::fs::copy(src, dst).map(|_| ()).map_err(|e| format!("can't save to {}: {e}", dst.display()));
+    let ext = dst.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    let fail = |e: String| format!("can't save to {}: {e}", dst.display());
+    match ext.as_str() {
+        "jpg" | "jpeg" => {
+            let image = image::open(src).map_err(|e| e.to_string())?.to_rgb8();
+            let file = std::fs::File::create(dst).map_err(|e| fail(e.to_string()))?;
+            image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 92)
+                .encode_image(&image)
+                .map_err(|e| fail(e.to_string()))
+        }
+        "png" | "" => std::fs::copy(src, dst).map(|_| ()).map_err(|e| fail(e.to_string())),
+        // Only PNG carries the recipe and the AI-generated mark, so no other format is written under its name.
+        other => Err(fail(format!("saving as .{other} isn't supported; use PNG or JPEG"))),
     }
-    let image = image::open(src).map_err(|e| e.to_string())?.to_rgb8();
-    let file = std::fs::File::create(dst).map_err(|e| format!("can't save to {}: {e}", dst.display()))?;
-    image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 92)
-        .encode_image(&image)
-        .map_err(|e| format!("can't save to {}: {e}", dst.display()))
 }
 
 fn save_ext(app: &App) -> &'static str {
@@ -568,9 +575,17 @@ fn main() {
                 // is caught mid-write (invalid JSON), leave scheme_seen alone so the next 2 s tick reads it again.
                 let scheme_now = caelestia::modified();
                 if scheme_now != scheme_seen {
-                    if let Some(scheme) = caelestia::read() {
-                        scheme_seen = scheme_now;
-                        let _ = h.emit("caelestia", scheme);
+                    match caelestia::read() {
+                        Some(scheme) => {
+                            scheme_seen = scheme_now;
+                            let _ = h.emit("caelestia", scheme);
+                        }
+                        // Deleted: go back to Latent's own theme instead of keeping the last colors it saw.
+                        None if !caelestia::present() => {
+                            scheme_seen = None;
+                            let _ = h.emit("caelestia", serde_json::Value::Null);
+                        }
+                        None => {}
                     }
                 }
                 let snap = hw::snapshot(&mut sys);
@@ -630,6 +645,8 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("a.jpg")).unwrap()[..2], [0xFF, 0xD8], "a real JPEG");
         export(&src, &dir.join("b.png")).unwrap();
         assert_eq!(std::fs::read(dir.join("b.png")).unwrap(), std::fs::read(&src).unwrap(), "PNG is copied byte for byte");
+        assert!(export(&src, &dir.join("c.webp")).is_err(), "no format is written under a name that isn't its own");
+        assert!(!dir.join("c.webp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

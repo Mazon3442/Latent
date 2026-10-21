@@ -12,6 +12,7 @@ Requests, one at a time (docs/PLAN.md section 5):
 Events: ready, progress, done, cancelled, error.
 """
 import json
+import os
 import queue
 import sys
 import threading
@@ -444,7 +445,8 @@ def main():
                     stop.set()
             else:
                 requests.put(r)
-        requests.put(None)  # stdin closed: Latent is gone
+        # Latent is gone (its end of stdin closed): exit now, even mid-frame, so no worker keeps the GPU.
+        os._exit(0)
 
     threading.Thread(target=read, daemon=True).start()
 

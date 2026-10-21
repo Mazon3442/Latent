@@ -64,6 +64,20 @@ function log(text, kind = "") {
   el.className = kind;
 }
 
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.append(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+  log("Copied the install command.");
+}
+
 let saveTimer;
 function saveSettings() {
   clearTimeout(saveTimer);
@@ -435,7 +449,9 @@ function installRow(m) {
       <div class="meta">${esc(i.label)}${bytes}</div>`;
   }
   const failed = i?.phase === "failed" ? `<div class="preflight error">${esc(i.label)}</div>` : "";
-  return `${failed}<div class="row"><button class="btn small" data-install="${m.id}">${failed ? "Try again" : "Download"}</button></div>`;
+  const copy = i?.phase === "failed" && i.command
+    ? `<button class="btn small" data-copy="${esc(i.command)}">Copy install command</button>` : "";
+  return `${failed}<div class="row"><button class="btn small" data-install="${m.id}">${failed ? "Try again" : "Download"}</button>${copy}</div>`;
 }
 
 /** The catalog again from the core, after a setting that changes which variant runs. */
@@ -453,7 +469,8 @@ async function installModel(id) {
     if (!state.model) state.model = id;
     log(`${modelName(id)} is ready.`);
   } catch (e) {
-    state.installing[id] = { phase: "failed", label: String(e) };
+    // Keep the command the "install" event may already have put here (the missing-uv hint).
+    state.installing[id] = { ...state.installing[id], phase: "failed", label: String(e) };
   }
   render();
 }
@@ -900,6 +917,7 @@ document.addEventListener("click", async e => {
   if (t.id === "settingsBtn") { renderSettings(); return openDialog("#settingsDlg"); }
   if (t.dataset.close !== undefined) return t.closest(".overlay").classList.remove("open");
   if (t.dataset.install) return installModel(t.dataset.install);
+  if (t.dataset.copy) return copyText(t.dataset.copy);
   if (t.dataset.pin) return togglePin(t.dataset.pin);
   if (t.dataset.remove) {
     const m = state.models.find(x => x.id === t.dataset.remove);

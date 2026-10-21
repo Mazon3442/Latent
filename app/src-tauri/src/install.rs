@@ -57,6 +57,27 @@ fn torch_args(device: &str) -> Vec<&'static str> {
     vec![TORCH, TORCHVISION, "--index-url", index]
 }
 
+/// The command that installs uv on this platform, for the interface's copy button.
+pub fn uv_install_command() -> String {
+    if cfg!(windows) {
+        "winget install astral-sh.uv".into()
+    } else if cfg!(target_os = "macos") {
+        "brew install uv".into()
+    } else {
+        match current_distro() {
+            Distro::Arch => "sudo pacman -S uv".into(),
+            Distro::Fedora => "sudo dnf install uv".into(),
+            Distro::Ubuntu | Distro::Debian => "curl -LsSf https://astral.sh/uv/install.sh | sh".into(),
+            _ => "curl -LsSf https://astral.sh/uv/install.sh | sh".into(),
+        }
+    }
+}
+
+/// Whether uv can be found, using the same lookup the installer uses.
+pub fn uv_available() -> bool {
+    uv().is_ok()
+}
+
 fn uv() -> Result<PathBuf, String> {
     let mut probe = Command::new("uv");
     probe.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
@@ -72,16 +93,7 @@ fn uv() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .find(|p| p.is_file())
         .ok_or_else(|| {
-            if cfg!(windows) {
-                "Downloading models needs uv. Install it with: winget install astral-sh.uv".into()
-            } else {
-                match current_distro() {
-                    Distro::Arch => "Downloading models needs uv. Install it with: sudo pacman -S uv".into(),
-                    Distro::Fedora => "Downloading models needs uv. Install it with: sudo dnf install uv".into(),
-                    Distro::Ubuntu | Distro::Debian => "Downloading models needs uv. Install it with: curl -LsSf https://astral.sh/uv/install.sh | sh".into(),
-                    _ => "Downloading models needs uv. Install it from https://docs.astral.sh/uv/getting-started/installation/".into(),
-                }
-            }
+            format!("Downloading models needs uv. Install it with: {}", uv_install_command())
         })
 }
 

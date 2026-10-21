@@ -27,3 +27,8 @@ pub fn read() -> Option<Value> {
 pub fn modified() -> Option<SystemTime> {
     std::fs::metadata(scheme_path()).and_then(|m| m.modified()).ok()
 }
+
+/// Whether the scheme file exists right now, so a deletion can be told apart from a write in progress.
+pub fn present() -> bool {
+    scheme_path().is_file()
+}

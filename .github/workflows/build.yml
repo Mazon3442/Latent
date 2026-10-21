@@ -1,7 +1,7 @@
-# Compiles the Rust core against each Linux distro's own webview and GTK headers, so a change that breaks
-# Debian, Ubuntu, Fedora or Arch shows up on the PR instead of at release time. Packaging is still built on
-# Ubuntu in release.yml; this job only proves the code compiles on each family.
-name: Linux build check
+# Compiles the Rust core on every platform we ship: each Linux distro's own webview and GTK headers, plus
+# macOS and Windows (so the Metal and macOS data-dir code is compiled, not just written). Packaging is still
+# built in release.yml; this workflow only proves the code compiles on each family.
+name: Build check
 
 on:
   push:
@@ -53,3 +53,25 @@ jobs:
         run: |
           . "$HOME/.cargo/env" 2>/dev/null || true
           cargo check --manifest-path app/src-tauri/Cargo.toml
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - run: cargo check --manifest-path app/src-tauri/Cargo.toml
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - run: cargo check --manifest-path app/src-tauri/Cargo.toml
