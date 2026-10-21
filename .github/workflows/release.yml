@@ -104,9 +104,54 @@ jobs:
             app/src-tauri/target/release/bundle/appimage/*.AppImage*
           if-no-files-found: error
 
-  # One job publishes the release once both builds succeed, so the two never race to create it.
+  # macOS: an .app and a .dmg for Apple Silicon. Signing and notarization need the APPLE_* secrets; without
+  # them the bundle is built unsigned. Remove continue-on-error once the first signed run has passed.
+  macos:
+    runs-on: macos-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: app/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Read version from tag
+        id: version
+        run: echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build app and dmg
+        run: npx --yes @tauri-apps/cli@2 build --bundles app,dmg --config "{\"version\":\"${{ steps.version.outputs.number }}\",\"bundle\":{\"createUpdaterArtifacts\":true}}"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            app/src-tauri/target/release/bundle/dmg/*.dmg*
+            app/src-tauri/target/release/bundle/macos/*.app.tar.gz*
+          if-no-files-found: error
+
+  # One job publishes the release once every build succeeds, so they never race to create it.
   release:
-    needs: [windows, linux]
+    needs: [windows, linux, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -140,7 +185,8 @@ jobs:
               found = [p for p in glob.glob(f"dist/**/{pattern}", recursive=True) if os.path.isfile(p + ".sig")]
               return {"url": base + os.path.basename(found[0]), "signature": open(found[0] + ".sig").read().strip()} if found else None
           platforms = {"windows-x86_64": entry("*.exe"), "linux-x86_64": entry("*.AppImage"),
-                       "linux-x86_64-deb": entry("*.deb"), "linux-x86_64-rpm": entry("*.rpm")}
+                       "linux-x86_64-deb": entry("*.deb"), "linux-x86_64-rpm": entry("*.rpm"),
+                       "darwin-aarch64": entry("*.app.tar.gz")}
           manifest = {"version": tag.lstrip("v"), "notes": open("notes.md").read().strip(),
                       "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                       "platforms": {k: v for k, v in platforms.items() if v}}
@@ -148,6 +194,19 @@ jobs:
           json.dump(manifest, open("dist/latest.json", "w"), indent=2)
           print(json.dumps(manifest, indent=2))
           PY
+
+      # macOS can be skipped (continue-on-error above), so its files are uploaded only when the build produced them.
+      # They go up first, so latest.json never points at a macOS update that isn't on the release yet.
+      - uses: softprops/action-gh-release@v2
+        if: hashFiles('dist/**/*.dmg') != ''
+        with:
+          name: Latent ${{ github.ref_name }}
+          body_path: notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/**/*.dmg
+            dist/**/*.app.tar.gz
 
       - uses: softprops/action-gh-release@v2
         with:

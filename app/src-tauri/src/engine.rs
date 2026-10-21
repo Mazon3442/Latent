@@ -112,6 +112,10 @@ impl Manager {
             ("HF_HUB_OFFLINE", "1".to_string()), // everything is on disk; loading never touches the network
             ("HF_HUB_DISABLE_SYMLINKS_WARNING", "1".to_string()),
         ];
+        if paths.device == "mps" {
+            // Metal doesn't implement every op diffusers uses; let those fall back to the CPU instead of failing.
+            envs.push(("PYTORCH_ENABLE_MPS_FALLBACK", "1".to_string()));
+        }
         envs.extend(paths.device_env.iter().map(|(k, v)| (k.as_str(), v.clone())));
         let dir = install::model_dir(&paths.home, m).to_string_lossy().to_string();
         let v = m.variants.iter().find(|v| v.id == variant).unwrap_or(&m.variants[0]);

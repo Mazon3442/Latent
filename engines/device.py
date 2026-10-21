@@ -18,7 +18,7 @@ def build(torch):
 
 
 def pick(torch):
-    """(device, fallback). device is "cuda" | "xpu" | "cpu" (ROCm's PyTorch drives AMD GPUs as "cuda").
+    """(device, fallback). device is "cuda" | "xpu" | "mps" | "cpu" (ROCm's PyTorch drives AMD GPUs as "cuda").
     fallback is None, or {"wanted", "build"} when a GPU was asked for but this PyTorch can't use it;
     Latent tells the user why and how to fix it."""
     wanted = os.environ.get("LATENT_DEVICE", "")
@@ -26,6 +26,10 @@ def pick(torch):
         return "cuda", None
     if wanted == "xpu" and hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu", None
+    if wanted == "mps":
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps", None
+        return "cpu", {"wanted": "mps", "build": build(torch)}
     if wanted in ("cuda", "xpu"):
         return "cpu", {"wanted": wanted, "build": build(torch)}
     return "cpu", None

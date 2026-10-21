@@ -486,9 +486,13 @@ fn resources_dir(handle: &AppHandle) -> PathBuf {
 
 /// `latent --install <model>` downloads a model without opening the window (used for testing and scripting).
 fn cli_install(id: &str) -> ! {
-    // Same folders Tauri uses: %APPDATA% / %LOCALAPPDATA% on Windows, $XDG_DATA_HOME on Linux.
+    // Same folders Tauri uses: %APPDATA% / %LOCALAPPDATA% on Windows, $XDG_DATA_HOME on Linux, and
+    // ~/Library/Application Support on macOS (where app_data_dir and app_local_data_dir both point).
     let (data, local) = if cfg!(windows) {
         (std::env::var("APPDATA").unwrap_or_default(), std::env::var("LOCALAPPDATA").unwrap_or_default())
+    } else if cfg!(target_os = "macos") {
+        let base = format!("{}/Library/Application Support", std::env::var("HOME").unwrap_or_default());
+        (base.clone(), base)
     } else {
         let d = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
         (d.clone(), d)
@@ -560,11 +564,14 @@ fn main() {
             let h = handle.clone();
             let mut scheme_seen = caelestia::modified();
             std::thread::spawn(move || loop {
-                // Caelestia rewrites its scheme when the wallpaper changes; Latent re-colors with it.
+                // Caelestia rewrites its scheme when the wallpaper changes; Latent re-colors with it. If the file
+                // is caught mid-write (invalid JSON), leave scheme_seen alone so the next 2 s tick reads it again.
                 let scheme_now = caelestia::modified();
                 if scheme_now != scheme_seen {
-                    scheme_seen = scheme_now;
-                    let _ = h.emit("caelestia", caelestia::read());
+                    if let Some(scheme) = caelestia::read() {
+                        scheme_seen = scheme_now;
+                        let _ = h.emit("caelestia", scheme);
+                    }
                 }
                 let snap = hw::snapshot(&mut sys);
                 *app.hw.lock().unwrap() = snap.clone();

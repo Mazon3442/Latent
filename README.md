@@ -6,11 +6,11 @@
   <img alt="Latent: local image generation and editing on your own GPU" src="docs/assets/brand/banner-dark.svg" width="100%">
 </picture>
 
-**Write a prompt or drop in a photo, and watch the image develop.<br>Runs on your own GPU, on Windows and Linux. Nothing leaves your computer.**
+**Write a prompt or drop in a photo, and watch the image develop.<br>Runs on your own GPU, on Windows, Linux and Apple Silicon Macs. Nothing leaves your computer.**
 
 [![Status: in development](https://img.shields.io/badge/status-in%20development-ffaa2c?style=flat-square)](docs/PLAN.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3987e5?style=flat-square)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-555?style=flat-square)](#install)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-555?style=flat-square)](#install)
 [![Built with Tauri 2 and Rust](https://img.shields.io/badge/built%20with-Tauri%202%20%2B%20Rust-24C8DB?style=flat-square&logo=tauri&logoColor=white)](https://tauri.app)
 
 [Features](#features) · [Models](#models) · [How it works](#how-it-works) · [Install](#install) · [Responsible use](#responsible-use) · [Privacy](#privacy)
@@ -53,7 +53,7 @@
 <div align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/architecture-dark.svg">
-  <img alt="Diagram: the interface talks to a Rust core through Tauri commands and events; the core runs a diffusion worker and a tools worker over JSON lines; models run on an NVIDIA GPU, an AMD GPU (Linux), an Intel Arc GPU or the CPU." src="docs/assets/charts/architecture-light.svg" width="760">
+  <img alt="Diagram: the interface talks to a Rust core through Tauri commands and events; the core runs a diffusion worker and a tools worker over JSON lines; models run on an NVIDIA GPU, an AMD GPU (Linux), an Intel Arc GPU, Apple Silicon (Metal) or the CPU." src="docs/assets/charts/architecture-light.svg" width="760">
 </picture>
 </div>
 
@@ -66,15 +66,20 @@ Not yet. The first release will ship like Mimic's:
 | Platform | Download |
 | --- | --- |
 | **Windows 10/11** | `Latent_<version>_x64-setup.exe` from Releases |
-| **Debian / Ubuntu** | `.deb` from Releases |
+| **macOS 14+ (Apple Silicon)** | `.dmg` from Releases |
+| **Debian 12+ / Ubuntu** | `.deb` from Releases |
 | **Fedora** | `.rpm` from Releases |
+| **Arch** | `latent` — PKGBUILD in `packaging/arch` (`makepkg -si`) |
 | **Any Linux** | `.AppImage` from Releases |
 
-Latent will also need **[uv](https://docs.astral.sh/uv/)** to set up the models (`winget install astral-sh.uv` on Windows), and enough disk for the models you choose: 8 to 30 GB each.
+Latent will also need **[uv](https://docs.astral.sh/uv/)** to set up the models — `winget install astral-sh.uv` on Windows, `sudo pacman -S uv` on Arch, `sudo dnf install uv` on Fedora, or the [installer script](https://docs.astral.sh/uv/#installation) on Debian/Ubuntu — and enough disk for the models you choose: 8 to 30 GB each.
+
+> [!NOTE]
+> The **AppImage** needs `libfuse2`, which Ubuntu 22.04+, Debian, Fedora and Arch no longer ship by default. If it won't start ("fuse: device not found"), install `libfuse2`/`fuse2`, or run it with `--appimage-extract-and-run`. Your distro's package (`.deb`, `.rpm`, PKGBUILD) doesn't need FUSE.
 
 ## Build from source
 
-Needs Rust (stable) and Node.js. On Windows, also the Microsoft C++ Build Tools. On Linux, WebKitGTK 4.1:
+Needs Rust (stable) and Node.js. On Windows, also the Microsoft C++ Build Tools. On Linux, WebKitGTK 4.1. On macOS, the Xcode command line tools:
 
 ```bash
 sudo apt install build-essential pkg-config libssl-dev libxdo-dev libwebkit2gtk-4.1-dev \
@@ -87,6 +92,7 @@ cargo run                                                # development build (ne
 cargo run -- --install z-image-turbo                     # download a model without opening the window
 npx @tauri-apps/cli@2 build                              # Windows installer in target/release/bundle/nsis
 npx @tauri-apps/cli@2 build --bundles deb,rpm,appimage   # Linux packages
+npx @tauri-apps/cli@2 build --bundles app,dmg            # macOS app and dmg
 ```
 
 The interface (`app/ui`) is packed into the app at build time, so build again after editing it.

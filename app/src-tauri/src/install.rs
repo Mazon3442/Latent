@@ -2,6 +2,7 @@
 //! PyTorch and diffusers, and a second PyTorch is about 4 GB), then the model's weights as plain files.
 //! Progress goes to the UI as "install" events and to logs/install-<id>.log.
 
+use crate::hw::{current_distro, Distro};
 use crate::models::Model;
 use crate::worker::{adopt, hidden, venv_python};
 use serde_json::json;
@@ -74,7 +75,12 @@ fn uv() -> Result<PathBuf, String> {
             if cfg!(windows) {
                 "Downloading models needs uv. Install it with: winget install astral-sh.uv".into()
             } else {
-                "Downloading models needs uv. On Arch: sudo pacman -S uv".into()
+                match current_distro() {
+                    Distro::Arch => "Downloading models needs uv. Install it with: sudo pacman -S uv".into(),
+                    Distro::Fedora => "Downloading models needs uv. Install it with: sudo dnf install uv".into(),
+                    Distro::Ubuntu | Distro::Debian => "Downloading models needs uv. Install it with: curl -LsSf https://astral.sh/uv/install.sh | sh".into(),
+                    _ => "Downloading models needs uv. Install it from https://docs.astral.sh/uv/getting-started/installation/".into(),
+                }
             }
         })
 }

@@ -1,0 +1,55 @@
+# Compiles the Rust core against each Linux distro's own webview and GTK headers, so a change that breaks
+# Debian, Ubuntu, Fedora or Arch shows up on the PR instead of at release time. Packaging is still built on
+# Ubuntu in release.yml; this job only proves the code compiles on each family.
+name: Linux build check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: ${{ matrix.distro }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: Arch
+            image: archlinux:latest
+          - distro: Debian
+            image: debian:bookworm
+          - distro: Ubuntu
+            image: ubuntu:24.04
+          - distro: Fedora
+            image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (Arch)
+        if: matrix.distro == 'Arch'
+        run: |
+          pacman -Syu --noconfirm --needed base-devel rust pkgconf openssl \
+            webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg xdotool
+
+      - name: Install build dependencies (Debian, Ubuntu)
+        if: matrix.distro == 'Debian' || matrix.distro == 'Ubuntu'
+        run: |
+          apt-get update
+          apt-get install -y build-essential pkg-config libssl-dev libxdo-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+      - name: Install build dependencies (Fedora)
+        if: matrix.distro == 'Fedora'
+        run: |
+          dnf install -y gcc gcc-c++ make pkgconf-pkg-config openssl-devel libxdo-devel \
+            webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel librsvg2-devel curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+      - name: Check
+        run: |
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          cargo check --manifest-path app/src-tauri/Cargo.toml

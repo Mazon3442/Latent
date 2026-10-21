@@ -62,8 +62,9 @@ struct Kfd {
     uuid: String,
 }
 
+/// The distro family from /etc/os-release, used to pick install commands and package sources.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
-enum Distro {
+pub enum Distro {
     Arch,
     Ubuntu,
     Debian,
@@ -143,6 +144,7 @@ fn distro_fix(d: Distro, what: &str) -> String {
         ("nvidia", Distro::Ubuntu) => "sudo ubuntu-drivers install",
         ("nvidia", Distro::Debian) => "sudo apt install nvidia-driver",
         ("nvidia", Distro::Fedora) => "sudo dnf install akmod-nvidia",
+        ("nvidia", Distro::Suse) => "sudo zypper install nvidia-video-G06",
         ("intel", Distro::Arch) => "sudo pacman -S intel-compute-runtime level-zero-loader",
         ("intel", Distro::Ubuntu | Distro::Debian) => "sudo apt install intel-opencl-icd libze1 libze-intel-gpu1",
         ("intel", Distro::Fedora) => "sudo dnf install intel-compute-runtime oneapi-level-zero",
@@ -150,6 +152,7 @@ fn distro_fix(d: Distro, what: &str) -> String {
     };
     match (what, cmd.is_empty()) {
         ("nvidia", false) if d == Distro::Fedora => format!("Install NVIDIA's driver from RPM Fusion: {cmd}, then restart."),
+        ("nvidia", false) if d == Distro::Suse => format!("Add NVIDIA's repository, then install its driver: {cmd}, then restart."),
         ("nvidia", false) => format!("Install NVIDIA's driver: {cmd}, then restart."),
         ("nvidia", true) => "Install NVIDIA's proprietary driver with your distribution's driver tool, then restart.".into(),
         ("intel", false) => format!("Install Intel's GPU compute runtime: {cmd}"),
@@ -443,6 +446,17 @@ fn distro(os_release: &str) -> Distro {
     else if has("fedora") { Distro::Fedora }
     else if ids.contains("suse") { Distro::Suse }
     else { Distro::Other }
+}
+
+/// The current distro family, for package choices and install commands. `Other` on non-Linux systems.
+#[cfg(unix)]
+pub fn current_distro() -> Distro {
+    distro(&read("/etc/os-release"))
+}
+
+#[cfg(not(unix))]
+pub fn current_distro() -> Distro {
+    Distro::Other
 }
 
 // ---------------------------------------------------------------- Windows: WMI
