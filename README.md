@@ -15,6 +15,15 @@
 
 [Features](#features) · [Install](#install) · [Quick start](#quick-start) · [Models](#models) · [How it works](#how-it-works) · [Build from source](#build-from-source) · [Responsible use](#responsible-use) · [Privacy](#privacy)
 
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/app-dark.png">
+  <img alt="Latent with Z-Image Turbo loaded: a lighthouse frame on the canvas, the model bar and VRAM meter above it, the prompt and Generate below, and the frame's recipe and actions on the right" src="docs/assets/screens/app-light.png" width="900">
+</picture>
+
+<sub>The real app: Z-Image Turbo making a 1024 × 1024 frame on an RTX 5070 Ti.</sub>
+
 </div>
 
 > [!NOTE]
@@ -28,7 +37,7 @@
 | **Edit any photo** | Drop, paste or import a picture and describe the change, or pick several and combine them. FLUX.3 klein keeps what you didn't ask to change. |
 | **Use as source** | Any frame becomes the input for the next edit with one key (E). Make, pick, refine, without saving and re-importing. |
 | **The right size for each model** | Choose an aspect ratio, not pixel counts. Latent picks the model's native resolution, so results don't come out stretched or cropped. |
-| **Models that fit your PC** | Latent reads your GPU and memory and offers each model in a variant that fits, quantized or offloaded when needed. It runs on NVIDIA, AMD Radeon (Linux), Intel Arc and Apple Silicon GPUs, or the CPU. The bar at the top shows real VRAM use, and hovering a model shows its footprint before you load it. |
+| **Models that fit your PC** | Latent reads your GPU and memory and offers each model in a variant that fits, quantized or offloaded when needed. It runs on NVIDIA, AMD Radeon (Linux), Intel Arc and Apple Silicon GPUs, or the CPU. A model too big for your GPU streams through it a block at a time, from RAM or from disk, in 2 to 5 GB of VRAM; with no usable GPU it runs on the CPU. Slow, but it works. The bar at the top shows real VRAM or RAM use, and hovering a model shows its footprint before you load it. |
 | **One model in memory** | Switching models unloads the old one first, and idle models unload after a set time, so the GPU is free for everything else. |
 | **Nothing saved behind your back** | Frames stay in a temporary cache until you press Save (Ctrl+S) or Save as (Ctrl+Shift+S). PNG or JPEG. |
 | **Every frame keeps its recipe** | Model, prompt, size, seed and steps go into every saved PNG. Press R to reuse a frame's recipe, seed included. |
@@ -77,13 +86,52 @@ On a Mac, use **Cmd** wherever this page says Ctrl.
 | **FLUX.3 klein** | generate, and edit with up to 10 reference photos, 16 steps | 12.9 GB VRAM peak · about 17 s per image, 33 s per edit | FLUX Kommunity License (commercial use free under US$5M revenue) | yes, needs a free [Hugging Face account](#hugging-face-account) |
 | **Qwen-Image 2.1 Turbo** | generate and edit, strong on text and layouts, 8 steps | 10.5 GB VRAM peak · about 20 s per image, 39 s per edit · 20 GB RAM | Qwen research license (**non-commercial**) | yes |
 | **FLUX.2 klein 4B** | generate and edit, 4 steps | 9.8 GB VRAM peak (6.2 GB as FP8 on 8 GB cards) · about 12 s per image or edit | Apache 2.0 | yes |
-| **SANA-Sprint 1.6B** | generate, 2 steps | 5.3 GB VRAM peak · about 7 s per image | Apache 2.0, Gemma terms for its text encoder | yes |
+| **SANA-Sprint 1.6B** | generate, 2 steps | 5.3 GB VRAM peak · about 7 s per image · on the CPU 11.9 GB RAM, about 37 s | Apache 2.0, Gemma terms for its text encoder | yes |
 | **Kromoss** | generate, 8 steps (a 5B MOSS-Image fine-tune with its turbo LoRA) | 13.7 GB VRAM peak (9.0 GB as FP8) · about 12 s per image | Apache 2.0 | yes |
 | **Qwen-Image 2.1 Uncensored** | generate and edit, 40 steps; **no content filter** | 10.5 GB VRAM peak · about 51 s per image, 107 s per edit · 7.1 GB download, runs on Qwen-Image 2.1 Turbo's text encoder and VAE | Qwen research license (**non-commercial**) | yes, needs Qwen-Image 2.1 Turbo first |
 | **Real-ESRGAN** | upscale | under 1 GB¹ | BSD-3-Clause | coming soon |
 | **BiRefNet** | remove background | about 2 GB¹ | MIT | coming soon |
 
-<sub>Measured with Latent on an RTX 5070 Ti (16 GB), with each model's text encoder on the CPU; on smaller GPUs Latent offloads the model instead, which needs less VRAM and runs slower. ¹ Published figures, not yet measured with Latent. No model weights are included in Latent; each is downloaded on request and keeps its own license, which applies to what you make with it.</sub>
+<sub>Measured with Latent on an RTX 5070 Ti (16 GB), with each model's text encoder on the CPU; on smaller GPUs Latent offloads the model instead, which needs less VRAM and runs slower. For small GPUs, slow tiers and the CPU, see [GPU or CPU](#gpu-or-cpu). ¹ Published figures, not yet measured with Latent. No model weights are included in Latent; each is downloaded on request and keeps its own license, which applies to what you make with it.</sub>
+
+### GPU or CPU
+
+Latent makes a model fit your PC by stepping down, and each step is slower than the last. With *Settings › Run models on* set to **Automatic** (the default) it picks the first that fits:
+
+1. **On the GPU**, the fastest variant that fits your VRAM and RAM.
+2. **Streamed from RAM.** The transformer and text encoder wait in RAM and visit the GPU one block at a time, so 2 to 5 GB of VRAM is enough. It needs the whole model in RAM (12 to 22 GB).
+3. **Streamed from disk.** The same, but the blocks wait on disk, so RAM only holds the part being loaded (6 to 21 GB). Latent keeps a copy of the model in your models folder while it's loaded (8 to 30 GB) and removes it when the model unloads. Qwen-Image and Kromoss skip step 2: they're too big to wait in RAM on most PCs.
+4. **On the CPU**, with the whole model in RAM (12 GB for SANA-Sprint, 19 to 35 GB for the others). This is the way when there's no GPU, or it has under 2 GB of VRAM.
+
+Choose **GPU** to keep every model on the graphics card (Latent says when one doesn't fit) or **CPU** to never use it. Apple Silicon has one pool of memory, so it has nothing to stream between and runs models whole.
+
+Seconds for one 1024 × 1024 frame on an RTX 5070 Ti with an NVMe SSD, and a Ryzen 7 7800X3D for the CPU. Streaming includes the first step, which encodes the prompt.
+
+| Model | On the GPU | Streamed from RAM | Streamed from disk | On the CPU |
+| --- | --- | --- | --- | --- |
+| **SANA-Sprint 1.6B** | 7 s | 12 s | 12 s | 37 s |
+| **FLUX.2 klein 4B** | 12 s | 23 s | 25 s | 177 s |
+| **Z-Image Turbo** | 13 s | 57 s | 108 s | not measured |
+| **FLUX.3 klein** | 17 s | 60 s | 111 s | not measured |
+| **Kromoss** | 12 s | not offered | 64 s | not measured |
+| **Qwen-Image 2.1 Turbo** | 20 s | not offered | 74 s | not measured |
+
+The tiers have the same output as the GPU: same weights, same seed. Disk streaming reads the model from disk at every step, so a hard drive makes it much slower than the NVMe here.
+
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/app-cpu-dark.png">
+  <img alt="Latent running SANA-Sprint 1.6B on the CPU: the top bar counts RAM, every model shows the RAM it would need, and a note under the prompt says each frame takes minutes" src="docs/assets/screens/app-cpu-light.png" width="760">
+</picture>
+<br><sub>SANA-Sprint 1.6B on the CPU with Run models on set to CPU: the bar counts RAM and each model shows what it would need.</sub>
+</div>
+
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/memory-dark.svg">
+  <img alt="Bar chart of the peak memory each model needs for one 1024 by 1024 frame, in three modes. GPU VRAM: Qwen-Image 2.1 Turbo and Uncensored 10.5 GB, Kromoss 13.7 GB, Z-Image Turbo 14.2 GB, FLUX.3 klein 12.9 GB, FLUX.2 klein 4B 9.8 GB, SANA-Sprint 1.6B 5.3 GB. RAM when streaming from disk: 17.1, 21.3, 16.1, 18.9, 11.1, 8.2 and 6.4 GB in the same order. RAM on the CPU: about 34.9, 34.9, 29.6, 23, 22.6 GB estimated, 18.6 GB for FLUX.2 klein 4B and 11.9 GB for SANA-Sprint, both measured." src="docs/assets/charts/memory-light.svg" width="760">
+</picture>
+</div>
 
 <details>
 <summary><b id="hugging-face-account">Hugging Face account (FLUX.3 klein)</b></summary>
@@ -130,7 +178,7 @@ The interface is plain HTML, CSS and JavaScript in the system web view. A small 
 
 - **Caelestia:** when `~/.local/state/caelestia/scheme.json` exists, choose Settings › Theme › *Caelestia* and Latent re-colors itself when the scheme changes with your wallpaper.
 - **Hyprland:** the window has no GTK title bar, because Hyprland draws its own borders.
-- **Where models run:** Settings › Run models on. *Automatic* picks CUDA on NVIDIA, ROCm on AMD Radeon cards, XPU on Intel Arc, and the CPU otherwise. If a driver or runtime is missing, Latent says which package to install for your distro.
+- **Where models run:** Settings › Run models on. *Automatic* picks CUDA on NVIDIA, ROCm on AMD Radeon cards, XPU on Intel Arc, and the CPU otherwise; a model too big for the GPU streams through it from RAM or disk, and runs on the CPU only when even that won't fit (see [GPU or CPU](#gpu-or-cpu)). If a driver or runtime is missing, Latent says which package to install for your distro.
 - **NVIDIA on Wayland:** Latent sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` by itself to avoid WebKitGTK's blank-window bug.
 
 </details>

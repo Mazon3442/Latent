@@ -69,11 +69,17 @@ button:disabled { cursor: not-allowed; }
 .app { height: 100vh; min-width: 960px; display: grid; grid-template-rows: auto 1fr auto; }
 
 /* ---------- top bar: the memory bar is the model picker ---------- */
-.top { display: grid; grid-template-columns: 260px 1fr auto; align-items: center; background: var(--surface); padding: 14px 20px 14px 22px; gap: 24px; }
-.wordmark { font: 500 clamp(28px, 1.6vw + 6px, 44px)/1 var(--display); letter-spacing: -0.02em; display: flex; align-items: center; gap: 0.34em; }
-.wordmark .mark { width: 0.92em; height: 0.92em; fill: var(--ink); flex-shrink: 0; }
+.top { display: grid; grid-template-columns: 300px 1fr auto; align-items: center; background: var(--surface); padding: 14px 20px 14px 22px; gap: 24px; }
+.wordmark { font: 500 clamp(40px, 2.4vw + 12px, 60px)/1 var(--display); letter-spacing: -0.02em; display: flex; align-items: center; gap: 0.3em; }
+.wordmark .mark { width: 0.92em; height: 0.92em; fill: var(--ink); flex-shrink: 0; overflow: visible; }
 .wordmark .mark .noise { fill: var(--ink-3); }
 .wordmark .mark .live { fill: var(--live); }
+/* While Latent loads a model or develops a batch, the halftone dots swell left to right, like the image coming up. */
+.wordmark .mark.working .noise, .wordmark .mark.working .live { transform-box: fill-box; transform-origin: center; animation: develop 1.6s var(--ease-in-out) infinite; }
+.wordmark .mark.working :nth-child(5n+3) { animation-delay: 0.14s; }
+.wordmark .mark.working :nth-child(5n+4) { animation-delay: 0.28s; }
+.wordmark .mark.working :nth-child(5n+5) { animation-delay: 0.42s; }
+@keyframes develop { 0%, 55%, 100% { transform: scale(1); } 25% { transform: scale(1.55); } 40% { transform: scale(0.75); } }
 .gpu { display: grid; gap: 8px; min-width: 0; }
 .model-btns { display: flex; gap: 4px; flex-wrap: wrap; }
 .model-btn { display: flex; align-items: baseline; gap: 8px; padding: 6px 12px; border-radius: var(--r); color: var(--ink-2); transition: background-color 120ms ease, transform 120ms var(--ease-out); }

@@ -41,10 +41,10 @@ struct App {
 type Shared = Arc<App>;
 
 impl App {
-    fn paths(&self) -> engine::Paths {
+    fn paths(&self, m: &models::Model) -> engine::Paths {
         // Separate statements: each lock is released before the next one is taken.
         let home = PathBuf::from(&self.settings.lock().unwrap().models_dir);
-        let device = self.device();
+        let device = self.device_for(m);
         let device_env = if device == "rocm" {
             self.hw.lock().unwrap().rocm_env.iter().filter(|(k, _)| std::env::var_os(k).is_none()).cloned().collect()
         } else {
@@ -59,26 +59,43 @@ impl App {
         hw::resolve_device(&setting, &hw)
     }
 
+    /// Where `m` runs. Automatic uses the GPU, but a model that fits no GPU variant here runs on the CPU, from RAM, when
+    /// it fits there. Choosing GPU in Settings keeps it on the GPU, and the interface says it doesn't fit.
+    fn device_for(&self, m: &models::Model) -> String {
+        let device = self.device();
+        if device == "cpu" || self.settings.lock().unwrap().device != "Automatic" {
+            return device;
+        }
+        let hw = self.hw.lock().unwrap().clone();
+        let on_gpu = m.variants.iter().any(|v| models::fits(v, hw.vram_total, hw.ram_total) != "no");
+        if on_gpu || m.fits_cpu(hw.ram_total) == "no" { device } else { "cpu".into() }
+    }
+
     /// The variant of `m` to run: the one asked for, or the fastest that fits this PC.
     fn variant(&self, m: &models::Model, id: Option<&str>) -> &'static models::Variant {
         let hw = self.hw.lock().unwrap().clone();
         let lightest = self.settings.lock().unwrap().low_vram;
-        m.variant(id, self.device() != "cpu", hw.vram_total, hw.ram_total, lightest)
+        m.variant(id, self.device_for(m) != "cpu", hw.vram_total, hw.ram_total, lightest)
     }
 
     /// The catalog with what this PC has: installed or not, whether each variant fits, and which one runs.
     fn models(&self) -> Value {
         let home = PathBuf::from(&self.settings.lock().unwrap().models_dir);
         let hw = self.hw.lock().unwrap().clone();
-        let on_gpu = self.device() != "cpu";
         models::CATALOG
             .iter()
             .map(|m| {
+                let device = self.device_for(m);
                 let mut v = serde_json::to_value(m).unwrap_or_default();
                 v["installed"] = install::is_installed(&home, m).into();
                 v["sizes"] = m.sizes.iter().map(|(a, w, h)| json!({ "aspect": a, "width": w, "height": h })).collect();
+                // Where this model will run, and whether it would fit on the CPU if it doesn't fit the GPU.
+                v["device"] = device.clone().into();
+                v["cpuFits"] = m.fits_cpu(hw.ram_total).into();
                 for (j, variant) in m.variants.iter().enumerate() {
-                    v["variants"][j]["fits"] = models::fits(variant, on_gpu, hw.vram_total, hw.ram_total).into();
+                    // On the CPU every variant is the same run: the whole model in RAM.
+                    v["variants"][j]["streams"] = variant.streams().into();
+                    v["variants"][j]["fits"] = if device == "cpu" { m.fits_cpu(hw.ram_total) } else { models::fits(variant, hw.vram_total, hw.ram_total) }.into();
                 }
                 v["recommended"] = self.variant(m, None).id.into();
                 v
@@ -163,7 +180,7 @@ async fn preload(handle: AppHandle, app: State<'_, Shared>, model: String, varia
     let app = app.inner().clone();
     blocking(move || {
         let m = models::find(&model)?;
-        app.engines.preload(&handle, &app.paths(), m, app.variant(m, variant.as_deref()).id)
+        app.engines.preload(&handle, &app.paths(m), m, app.variant(m, variant.as_deref()).id)
     })
     .await
 }
@@ -198,7 +215,7 @@ fn generate(handle: AppHandle, app: State<'_, Shared>, mut request: GenRequest) 
     }
     let app = app.inner().clone();
     let id = batch.clone();
-    std::thread::spawn(move || app.engines.run_batch(&handle, &app.paths(), &app.library, &id, &request, &sources));
+    std::thread::spawn(move || app.engines.run_batch(&handle, &app.paths(m), &app.library, &id, &request, &sources));
     Ok(json!({ "batch": batch }))
 }
 

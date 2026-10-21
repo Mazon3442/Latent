@@ -221,10 +221,70 @@ def architecture_svg(p, line):
 """
 
 
+# Peak memory per model, in GB, measured with Latent at 1024 x 1024: VRAM on an RTX 5070 Ti with the whole model on the GPU;
+# the RAM needed when it streams from disk (it then needs only 2 to 4 GB of VRAM); and the RAM needed to run it on the CPU
+# (`cpu` in app/src-tauri/src/models.rs). SANA-Sprint and FLUX.2 klein were measured on the CPU (Ryzen 7 7800X3D); the
+# rest are worked out from parameter counts, and drawn hatched so nobody reads them as measurements.
+MEMORY = [  # (name, VRAM, RAM streaming from disk, CPU RAM, CPU RAM measured?)
+    ("Qwen-Image 2.1 Turbo", 10.5, 17.1, 34.9, False),
+    ("Qwen-Image 2.1 Uncensored", 10.5, 21.3, 34.9, False),
+    ("Kromoss", 13.7, 16.1, 29.6, False),
+    ("Z-Image Turbo", 14.2, 18.9, 23.0, False),
+    ("FLUX.3 klein", 12.9, 11.1, 22.6, False),
+    ("FLUX.2 klein 4B", 9.8, 8.2, 18.6, True),
+    ("SANA-Sprint 1.6B", 5.3, 6.4, 11.9, True),
+]
+CPU_BLUE = "#3987E5"
+DISK_GREEN = "#2FB67C"
+
+
+def memory_svg(p, line):
+    """Bar chart of what each model needs on a GPU, streaming from disk, and on the CPU, in the layout of Mimic's chart."""
+    font = "'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+    grid = "#2A2B2F" if p is DARK else "#D4D4CE"
+    x0, scale, top, row = 224, 12.0, 130, 72  # bars start at x0; px per GB
+    w, h = 880, top + row * len(MEMORY) + 84
+    hatch = lambda color: f'fill="{color}" fill-opacity="0.35" stroke="{color}" stroke-width="1.2" stroke-dasharray="3 2"'
+    parts = [f'<text x="32" y="44" font-size="20" font-weight="600" fill="{p["ink"]}">Memory each model needs</text>',
+             f'<text x="32" y="68" font-size="14" fill="{p["ink2"]}">Peak while making one 1024 × 1024 frame: VRAM on the GPU, RAM when streaming from disk or on the CPU</text>']
+    x = 32
+    for label, color, est, step in [("GPU (VRAM)", p["light"], False, 100), ("Streamed from disk (RAM)", DISK_GREEN, False, 196),
+                                    ("CPU (RAM)", CPU_BLUE, False, 100), ("CPU, estimated", CPU_BLUE, True, 120)]:
+        fill = hatch(color) if est else f'fill="{color}"'
+        parts.append(f'<rect x="{x}" y="84" width="12" height="12" rx="3" {fill}/><text x="{x + 18}" y="95" font-size="13" fill="{p["ink2"]}">{label}</text>')
+        x += step
+    for gb in (0, 8, 16, 24, 32):
+        gx = x0 + gb * scale
+        parts.append(f'<line x1="{gx}" y1="{top - 8}" x2="{gx}" y2="{top + row * len(MEMORY) - 6}" stroke="{grid}" stroke-width="1"/>'
+                     f'<text x="{gx}" y="{top + row * len(MEMORY) + 14}" font-size="12" fill="{line}" text-anchor="middle">{gb} GB</text>')
+
+    def bar(y, gb, color, est):
+        wd = gb * scale
+        d = f"M{x0},{y} H{x0 + wd - 4} Q{x0 + wd},{y} {x0 + wd},{y + 4} V{y + 10} Q{x0 + wd},{y + 14} {x0 + wd - 4},{y + 14} H{x0} Z"
+        text = f'{"about " if est else ""}{gb:g} GB'
+        return f'<path d="{d}" {hatch(color) if est else f"fill=\"{color}\""}/><text x="{x0 + wd + 8}" y="{y + 11}" font-size="13" fill="{p["ink2"]}">{text}</text>'
+
+    for i, (name, vram, disk, cpu, measured) in enumerate(MEMORY):
+        y = top + i * row
+        parts.append(f'<text x="{x0 - 16}" y="{y + 32}" font-size="14" fill="{p["ink"]}" text-anchor="end">{name}</text>'
+                     + bar(y + 2, vram, p["light"], False) + bar(y + 22, disk, DISK_GREEN, False) + bar(y + 42, cpu, CPU_BLUE, not measured))
+    foot = [f'<text x="32" y="{h - 52}" font-size="12" fill="{line}">GPU: measured with Latent on an RTX 5070 Ti (16 GB), the fastest variant that fits. Streaming from disk needs only 2 to 5 GB of VRAM,</text>',
+            f'<text x="32" y="{h - 34}" font-size="12" fill="{line}">but keeps a copy of the model on disk (8 to 30 GB). CPU: the whole model in RAM. SANA-Sprint and FLUX.2 klein were measured on a</text>',
+            f'<text x="32" y="{h - 16}" font-size="12" fill="{line}">Ryzen 7 7800X3D; the other CPU figures are worked out from parameter counts.</text>']
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" aria-label="Memory each model needs" font-family="{font}">
+<title>Memory each model needs</title>
+<rect width="{w}" height="{h}" rx="16" fill="{p['ground']}"/>
+{"".join(parts)}{"".join(foot)}
+</svg>
+"""
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     charts = ROOT / "docs" / "assets" / "charts"
     charts.mkdir(parents=True, exist_ok=True)
+    (charts / "memory-dark.svg").write_text(memory_svg(DARK, "#7A7C7F"), encoding="utf-8")
+    (charts / "memory-light.svg").write_text(memory_svg(LIGHT, "#75777A"), encoding="utf-8")
     (charts / "architecture-dark.svg").write_text(architecture_svg(DARK, "#7A7C7F"), encoding="utf-8")
     (charts / "architecture-light.svg").write_text(architecture_svg(LIGHT, "#75777A"), encoding="utf-8")
     files = {

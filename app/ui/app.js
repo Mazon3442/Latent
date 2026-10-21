@@ -54,6 +54,8 @@ const state = {
 const model = () => state.models.find(m => m.id === state.model);
 const installed = () => state.models.filter(m => m.installed);
 const variant = m => m.variants.find(v => v.id === m.recommended) || m.variants[0]; // the core picks; this mirrors it
+// What a model needs where it will run: the VRAM of its variant on a GPU, or the whole model in RAM on the CPU.
+const memNeed = m => m.device === "cpu" ? { gb: m.cpu, unit: "RAM" } : { gb: variant(m).vram, unit: "VRAM" };
 /** The size the next batch uses: for an edit, the model size closest to the first photo's shape; else the aspect picked. */
 function sizeFor(m) {
   const src = m.can.edit && state.sources.find(s => s.id === state.attached[0]);
@@ -152,13 +154,14 @@ function togglePin(id) {
 }
 
 function renderTop() {
+  $(".wordmark .mark").classList.toggle("working", !!state.run || Object.values(state.engine).some(s => s === "loading" || s === "busy"));
   const list = topBarModels();
   const hidden = installed().length - list.length;
   $("#modelBtns").innerHTML = list.map(m => {
     const s = engineState(m.id);
     const label = { warm: "loaded", busy: "developing", loading: "loading", cold: "not loaded" }[s];
     return `<button class="model-btn" data-id="${m.id}" aria-pressed="${m.id === state.model}">
-      <b>${esc(m.name)}</b><span>${gb(variant(m).vram)} GB</span><span class="state" data-s="${s}">${label}</span></button>`;
+      <b>${esc(m.name)}</b><span>${gb(memNeed(m).gb)} GB${m.device === "cpu" ? " RAM" : ""}</span><span class="state" data-s="${s}">${label}</span></button>`;
   }).join("") + `<button class="model-btn" id="modelsBtn" title="${hidden ? `${hidden} more installed, not pinned` : "Download, remove and pin models"}">${
        !installed().length ? "Get a model…" : hidden ? `Models… <span class="meta">+${hidden}</span>` : "Models…"}</button>`;
   renderMem();
@@ -167,18 +170,19 @@ function renderTop() {
 function renderMem() {
   const hw = state.hw;
   if (!hw) return;
-  const gpu = hw.vramTotal > 0 && state.device !== "cpu";
+  const hovered = state.models.find(m => m.id === state.hover);
+  // The bar shows the memory the model under the pointer (or the selected one) will use: VRAM, or RAM when it runs on the CPU.
+  const gpu = hw.vramTotal > 0 && state.device !== "cpu" && (hovered || model())?.device !== "cpu";
   const [used, total, unit] = gpu ? [hw.vramUsed, hw.vramTotal, "VRAM"] : [hw.ramUsed, hw.ramTotal, "RAM"];
   $(".bar .fill").style.transform = `scaleX(${total ? Math.min(1, used / total) : 0})`;
   const ghost = $(".bar .ghost");
-  const hovered = state.models.find(m => m.id === state.hover);
   let text = `<b>${gb(used)}</b> of ${gb(total)} GB ${unit}`;
   if (hovered && state.resident !== hovered.id && total) {
-    const need = gpu ? variant(hovered).vram : variant(hovered).ram;
+    const need = memNeed(hovered).gb;
     ghost.style.left = `${Math.min(100, (used / total) * 100)}%`;
     ghost.style.width = `${(need / total) * 100}%`;
     ghost.classList.add("on");
-    text += ` · ${esc(hovered.name)} needs about ${gb(need)} GB`;
+    text += ` · ${esc(hovered.name)} needs about ${gb(need)} GB${hovered.device === "cpu" ? " on the CPU" : ""}`;
   } else {
     ghost.classList.remove("on");
     if (state.resident) text += ` · ${esc(modelName(state.resident))} loaded`;
@@ -255,18 +259,24 @@ function preflight() {
   if (!installed().length) return { block: true, text: "Download a model first.", fix: "models" };
   if (!m) return { block: true, text: "Pick a model." };
   if (state.attached.length && !m.can.edit) return { block: true, warn: true, text: `${m.name} makes new images. Detach the photo, or pick a model that can edit.` };
-  if (variant(m).fits === "no") return { block: true, warn: true, text: `${m.name} needs about ${gb(variant(m).vram)} GB, more than this PC has.` };
+  if (variant(m).fits === "no") {
+    const n = memNeed(m);
+    const cpu = state.settings.device === "GPU" && m.cpuFits !== "no" ? " Set Run models on to Automatic to run it on the CPU from RAM, much slower." : "";
+    return { block: true, warn: true, text: `${m.name} needs about ${gb(n.gb)} GB of ${n.unit}, more than this PC has.${cpu}` };
+  }
   if (state.error) return { error: true, text: state.error };
   if (!$("#prompt").value.trim()) return { block: true, text: "Write what to make." };
   const hw = state.hw;
-  const free = hw && hw.vramTotal > 0 && state.device !== "cpu" ? hw.vramTotal - hw.vramUsed : null;
+  const free = hw && hw.vramTotal > 0 && m.device !== "cpu" ? hw.vramTotal - hw.vramUsed : null;
   if (free !== null && state.resident !== m.id && free < variant(m).vram) {
     return { warn: true, text: `Only ${gb(free)} GB of VRAM is free and ${m.name} needs about ${gb(variant(m).vram)} GB. Close other GPU apps (a local LLM server, a game) or it will run slowly.` };
   }
   const s = sizeFor(m);
   const steps = state.steps ?? m.options.steps.default;
   const load = state.resident === m.id ? "loaded, starts now" : "loads first (about a minute)";
-  return { text: `${s.width} × ${s.height} · ${steps} steps · ${state.seed === "" ? "random seed" : "seed " + state.seed} · ${load}` };
+  const slow = m.device === "cpu" ? " · on the CPU, so it's slow"
+    : variant(m).streams ? " · streams the model through the GPU a block at a time, so it's slow" : "";
+  return { text: `${s.width} × ${s.height} · ${steps} steps · ${state.seed === "" ? "random seed" : "seed " + state.seed} · ${load}${slow}` };
 }
 
 function renderPreflight() {
@@ -290,7 +300,7 @@ function menuHtml(kind) {
       const v = variant(x);
       const does = x.can.edit ? "makes and edits images" : "makes new images";
       return `<button class="mi" data-pick-model="${x.id}" aria-checked="${x.id === state.model}"><b>${esc(x.name)}<em>${{ warm: "loaded", busy: "developing", loading: "loading", cold: "not loaded" }[engineState(x.id)]}</em></b>
-        <span>${does} · about ${gb(v.vram)} GB · ${x.options.steps.default} steps</span></button>`;
+        <span>${does} · about ${gb(memNeed(x).gb)} GB${x.device === "cpu" ? " RAM" : ""} · ${x.options.steps.default} steps</span></button>`;
     };
     const pins = pinned();
     const rest = installed().filter(x => !pins.includes(x));
@@ -469,7 +479,7 @@ function emptyNoModel() {
   const fit = { yes: "Fits this PC.", tight: "Fits, with little room to spare.", no: "Needs more memory than this PC has." }[v.fits];
   return `${MARK()}<h3>Download a model to start.</h3>
     <div class="starter"><div><b>${esc(m.name)}</b> · ${esc(m.license)}</div>
-    <div>Makes new images in ${m.options.steps.default} steps. ${gb(v.disk)} GB download, about ${gb(v.vram)} GB of VRAM while it works. ${fit}</div>
+    <div>Makes new images in ${m.options.steps.default} steps. ${gb(v.disk)} GB download, about ${gb(memNeed(m).gb)} GB of ${memNeed(m).unit} while it works. ${fit}</div>
     ${installRow(m)}</div>`;
 }
 
@@ -689,7 +699,7 @@ function renderModels() {
         : account + installRow(m);
       const warning = m.warning ? `<div class="meta warn">${esc(m.warning)}</div>` : "";
       return `<div class="model-card"><div class="title"><b>${esc(m.name)}</b><span class="fit-${v.fits}">${fit}</span></div>${warning}
-        <div class="facts">${does} in ${m.options.steps.default} steps. ${gb(v.disk)} GB download · about ${gb(v.vram)} GB VRAM (${esc(v.label)}) ·
+        <div class="facts">${does} in ${m.options.steps.default} steps. ${gb(v.disk)} GB download · ${m.device === "cpu" ? `about ${gb(m.cpu)} GB RAM, running on the CPU` : `about ${gb(v.vram)} GB VRAM (${esc(v.label)})`} ·
         ${esc(m.license)}${m.commercial ? "" : ", non-commercial"}</div>${action}</div>`;
     }).join("") + `<p class="meta">Models live in ${esc(state.settings.modelsDir)} <button class="info" data-help="modelsDir" aria-label="About the models folder" title="What's this?">i</button>. Removing one frees its disk space; Latent can download it again any time.</p>
       <p class="meta">Pinned models are the ones in the top bar. With none pinned, every installed model shows there; the rest stay in the model menu either way.</p>`;
@@ -731,8 +741,13 @@ const HELP = {
   device: {
     title: "Run models on",
     body: () => `
-      <p><b>Automatic</b> uses this PC's GPU when it can run models, and the CPU otherwise.
-      <b>GPU</b> insists on the graphics card; <b>CPU</b> never uses it (much slower, but works anywhere).</p>
+      <p><b>Automatic</b> uses this PC's GPU, and makes a model fit it step by step: the fastest variant that fits, then
+      <b>streaming</b> (the model waits in RAM, or on disk, and visits the GPU a block at a time, so 2 to 5 GB of VRAM is
+      enough), and the CPU only when even that won't fit. Each step down is slower, but it works.
+      <b>GPU</b> insists on the graphics card and says when a model doesn't fit; <b>CPU</b> never uses it.</p>
+      <p class="meta">Streaming from RAM needs the whole model in RAM (12 to 22 GB). Streaming from disk keeps a copy on
+      disk instead (8 to 30 GB, removed when the model unloads) and needs 6 to 21 GB of RAM. The CPU holds the whole model in
+      RAM: 12 GB for SANA-Sprint, 19 to 35 GB for the others.</p>
       <p>This PC: <b>${esc(state.hw?.gpu || "no GPU found")}</b>, running on <b>${esc(state.device.toUpperCase())}</b>.${state.hw?.note ? " " + esc(state.hw.note) : ""}</p>
       ${state.hw?.fix ? `<p>To let the GPU run models: <code>${esc(state.hw.fix)}</code></p>` : ""}
       <p class="meta">A change applies the next time a model loads.</p>`,

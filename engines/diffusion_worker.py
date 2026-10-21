@@ -1,10 +1,12 @@
 """Diffusion worker for Latent. Run with diffusion-env python (-X utf8). Speaks JSON lines on stdin/stdout.
 
-Start args: <family> <model folder> <offload: none | text | model> <weights: bf16 | fp8> [<base model folder>]
+Start args: <family> <model folder> <offload: none | text | model | stream | disk> <weights: bf16 | fp8> [<base model folder>]
   base:  the folder of the model this one runs on (its text encoder and VAE), for models that need one
   none:  everything on the GPU
   text:  the text encoder stays on the CPU (prompts are encoded once and cached); the rest stays on the GPU
   model: each part moves to the GPU only while it runs (least VRAM, slowest: weights cross PCIe every frame)
+  stream: the transformer and text encoder wait in RAM and visit the GPU one block at a time (a few GB of VRAM, much slower)
+  disk:  the same, but they wait on disk in LATENT_OFFLOAD_DIR, so RAM only holds a block (slowest)
   fp8:   the transformer's weights are stored as FP8 (half the memory) and computed in bf16 a layer at a time
 Requests, one at a time (docs/PLAN.md section 5):
   {"op": "generate", "id", "prompt", "negative"?, "sources": [paths], "width", "height", "seed",
@@ -16,6 +18,7 @@ import json
 import os
 import queue
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -35,6 +38,8 @@ FOLDER = Path(sys.argv[2])
 OFFLOAD = sys.argv[3] if len(sys.argv) > 3 else "none"
 WEIGHTS = sys.argv[4] if len(sys.argv) > 4 else "bf16"
 BASE = Path(sys.argv[5]) if len(sys.argv) > 5 else None
+# Where "disk" streaming keeps the weights while a model is loaded; Latent clears it when the model unloads.
+OFFLOAD_DIR = Path(os.environ.get("LATENT_OFFLOAD_DIR") or tempfile.gettempdir()) / "latent-offload"
 GIB = 1024 ** 3
 
 _out = threading.Lock()
@@ -69,6 +74,42 @@ def store(transformer):
     """FP8 storage when the variant asks for it: half the VRAM, computed in bf16 a layer at a time (diffusers)."""
     if WEIGHTS == "fp8":
         transformer.enable_layerwise_casting(storage_dtype=torch.float8_e4m3fn, compute_dtype=torch.bfloat16)
+
+
+def streaming():
+    """Layer streaming, for PCs too small for anything else: the big parts wait in RAM ("stream") or on disk ("disk") and
+    visit the GPU one block at a time, so a few GB of VRAM is enough. Slow: every step moves the whole model."""
+    return OFFLOAD in ("stream", "disk")
+
+
+def stream(module, name, device):
+    """Start streaming one part (diffusers' group offloading). On disk each part gets its own folder: parts that share
+    one overwrite each other's weights."""
+    import gc
+    from diffusers.hooks import apply_group_offloading
+    where = {"offload_to_disk_path": str(OFFLOAD_DIR / name)} if OFFLOAD == "disk" else {}
+    # Blocks are only found as direct children of the module, and a text encoder nests its layers (a Qwen3-VL's are at
+    # model.language_model.layers): left to blocks it would go to the GPU whole, 17 GB of it. Per layer works for any nesting.
+    how = {"offload_type": "leaf_level"} if name == "text_encoder" else {"offload_type": "block_level", "num_blocks_per_group": 1}
+    apply_group_offloading(module, onload_device=torch.device(device), offload_device=torch.device("cpu"), **how, **where)
+    gc.collect()  # the weights just left RAM (to the disk) or moved into the offload cache; free what's left of the load
+
+
+def pipeline(cls, folder, dtype, device, **given):
+    """cls.from_pretrained. When streaming, the transformer and text encoder load one at a time and start streaming at
+    once, so RAM never holds more than the largest one."""
+    if not streaming():
+        return cls.from_pretrained(folder, dtype=dtype, **given)
+    import importlib
+    index = json.loads((folder / "model_index.json").read_text())
+    parts = [n for n in ("transformer", "text_encoder") if n in index and n not in given]
+    pipe = cls.from_pretrained(folder, dtype=dtype, **given, **{n: None for n in parts})
+    for n in parts:
+        library, class_name = index[n]
+        module = getattr(importlib.import_module(library), class_name).from_pretrained(folder / n, dtype=dtype)
+        stream(module, n, device)
+        pipe.register_modules(**{n: module})
+    return pipe
 
 
 def run_on_cpu(text_encoder):
@@ -113,12 +154,14 @@ class ZImage:
 
     def __init__(self, device, dtype):
         from diffusers import ZImagePipeline
-        pipe = ZImagePipeline.from_pretrained(FOLDER, dtype=dtype)
+        pipe = pipeline(ZImagePipeline, FOLDER, dtype, device)
         pipe.set_progress_bar_config(disable=True)
         pipe.vae.enable_tiling()  # decoding in tiles keeps the end-of-frame peak from pushing VRAM into shared memory
         encoder, encode_on = pipe.text_encoder, device
         if device == "cpu" or OFFLOAD == "none":
             pipe.to(device)
+        elif streaming():
+            pipe.vae.to(device)  # the transformer and text encoder are already streaming
         elif OFFLOAD == "text":
             encode_on = "cpu"
             pipe.text_encoder = None  # out of the pipeline, so it runs on the transformer's device
@@ -196,9 +239,13 @@ class Flux3Klein:
 
         # Components come from the downloaded folders; the repo's index points at the Hub, which loading never touches.
         text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(FOLDER / "text_encoder", dtype=dtype)
+        if streaming():
+            stream(text_encoder, "text_encoder", device)
         tokenizer = Qwen3VLProcessor.from_pretrained(FOLDER / "text_encoder")
         transformer = Flux3Transformer2DModel.from_pretrained(FOLDER / "transformer", dtype=dtype)
         store(transformer)
+        if streaming():
+            stream(transformer, "transformer", device)
         vae = AutoencoderKLFlux2.from_pretrained(FOLDER / "vae", dtype=dtype)
         vae.enable_tiling()
 
@@ -210,10 +257,13 @@ class Flux3Klein:
         self.pipe = blocks.init_pipeline()
         self.pipe.update_components(transformer=transformer, vae=vae)
 
-        text_encoder.to("cpu" if OFFLOAD == "text" or device == "cpu" else device)
-        if device != "cpu" and OFFLOAD == "model":
+        if streaming():
+            vae.to(device)  # the text encoder and transformer are already streaming
+        elif device != "cpu" and OFFLOAD == "model":
+            text_encoder.to(device)
             self.pipe.enable_model_cpu_offload(device=device)
         else:
+            text_encoder.to("cpu" if OFFLOAD == "text" or device == "cpu" else device)
             transformer.to(device)
             vae.to(device)
         self.vae, self.device = vae, torch.device(device)
@@ -257,12 +307,14 @@ class Flux2Klein:
 
     def __init__(self, device, dtype):
         from diffusers import Flux2KleinPipeline
-        pipe = Flux2KleinPipeline.from_pretrained(FOLDER, dtype=dtype)
+        pipe = pipeline(Flux2KleinPipeline, FOLDER, dtype, device)
         pipe.set_progress_bar_config(disable=True)
         pipe.vae.enable_tiling()
         store(pipe.transformer)
         if device == "cpu" or OFFLOAD == "none":
             pipe.to(device)
+        elif streaming():
+            pipe.vae.to(device)
         elif OFFLOAD == "text":
             pipe.transformer.to(device)
             pipe.vae.to(device)
@@ -306,14 +358,17 @@ class QwenImage21:
 
     def load_pipeline(self, transformer, dtype):
         from diffusers import QwenImage21Pipeline
-        return QwenImage21Pipeline.from_pretrained(FOLDER, transformer=transformer, dtype=dtype)
+        return pipeline(QwenImage21Pipeline, FOLDER, dtype, self.run_device, transformer=transformer)
 
     def __init__(self, device, dtype):
         import gc
+        self.run_device = device
         # The transformer loads and shrinks to FP8 before the text encoder arrives, so RAM never holds both at bf16.
         transformer = self.load_transformer(dtype)
         store(transformer)
-        if device != "cpu":
+        if streaming():
+            stream(transformer, "transformer", device)
+        elif device != "cpu":
             transformer.to(device)
         gc.collect()
         pipe = self.load_pipeline(transformer, dtype)
@@ -322,7 +377,7 @@ class QwenImage21:
         pipe.vae.to(device)
         if device == "cpu" or OFFLOAD == "none":
             pipe.text_encoder.to(device)
-        else:
+        elif not streaming():
             run_on_cpu(pipe.text_encoder)
         self.pipe, self.vae, self.device = pipe, pipe.vae, pipe._execution_device
 
@@ -385,7 +440,7 @@ class QwenImage21Uncensored(QwenImage21):
 
     def load_pipeline(self, transformer, dtype):
         from diffusers import FlowMatchEulerDiscreteScheduler, QwenImage21Pipeline
-        turbo = QwenImage21Pipeline.from_pretrained(BASE, transformer=transformer, dtype=dtype)
+        turbo = pipeline(QwenImage21Pipeline, BASE, dtype, self.run_device, transformer=transformer)
         # A new pipeline around the same parts: Turbo's own would run its saved 8-step sigmas.
         return QwenImage21Pipeline(**{**turbo.components, "scheduler": FlowMatchEulerDiscreteScheduler(**self.SCHEDULER)})
 
@@ -399,11 +454,13 @@ class SanaSprint:
     def __init__(self, device, dtype):
         import inspect
         from diffusers import SanaSprintPipeline
-        pipe = SanaSprintPipeline.from_pretrained(FOLDER, dtype=dtype)
+        pipe = pipeline(SanaSprintPipeline, FOLDER, dtype, device)
         pipe.set_progress_bar_config(disable=True)
         encoder, encode_on = pipe.text_encoder, device
         if device == "cpu" or OFFLOAD == "none":
             pipe.to(device)
+        elif streaming():
+            pipe.vae.to(device)
         else:
             encode_on = "cpu"
             pipe.text_encoder = None  # out of the pipeline, so it runs on the transformer's device
@@ -462,7 +519,9 @@ class Kromoss:
         # The transformer goes to the GPU (as FP8 when asked) before the text encoder arrives, so RAM never holds both.
         transformer = MOSSImageTransformer.from_pretrained(FOLDER / "transformer", torch_dtype=dtype).eval()
         store(transformer)
-        if device != "cpu":
+        if streaming():
+            stream(transformer, "transformer", device)
+        elif device != "cpu":
             transformer.to(device)
         gc.collect()
         # The LoRA is applied unmerged, as its card says: its delta is close to bf16's rounding step.
@@ -475,13 +534,18 @@ class Kromoss:
             modules[name].register_forward_hook(
                 lambda module, args, out, down=down, up=up, scale=scale: out + (scale * (args[0].float() @ down.T) @ up.T).to(out.dtype))
         text_encoder = AutoModel.from_pretrained(FOLDER / "text_encoder", dtype=dtype).eval()
+        if streaming():
+            stream(text_encoder, "text_encoder", device)
+            # Its linear-attention layers read their conv's weight directly, which no per-layer hook sees: keep those (tiny) here.
+            for conv in (m for m in text_encoder.modules() if isinstance(m, torch.nn.Conv1d)):
+                conv.to(device)
         vae = AutoencoderKLFlux2.from_pretrained(FOLDER, subfolder="vae", torch_dtype=torch.float32).eval()
         pipe = MOSSImagePipeline(transformer, MOSSImageScheduler(), text_encoder, AutoTokenizer.from_pretrained(FOLDER / "tokenizer"), vae)
         pipe.set_progress_bar_config(disable=True)
         vae.to(device)
         if device == "cpu" or OFFLOAD == "none":
             text_encoder.to(device)
-        else:
+        elif not streaming():
             run_on_cpu(text_encoder)
         self.pipe, self.vae, self.device = pipe, vae, pipe._execution_device
         self.prompts = PromptCache(lambda prompt: pipe.encode_prompt(prompt))
@@ -519,10 +583,13 @@ def write_preview(image, path):
 # ---------------------------------------------------------------- protocol
 
 def main():
+    global OFFLOAD
     device, fallback = pick(torch)
+    if device == "cpu" and streaming():
+        OFFLOAD = "none"  # nothing to stream to: the model just runs from RAM
     started = time.time()
     try:
-        dtype = torch.bfloat16 if device != "cpu" else torch.float32  # bfloat16 is slow or unsupported on most CPUs
+        dtype = torch.bfloat16
         model = FAMILIES[FAMILY](device, dtype)
     except Exception as error:  # the core shows this instead of "the model stopped"
         kind = "oom" if isinstance(error, torch.OutOfMemoryError) else "model"

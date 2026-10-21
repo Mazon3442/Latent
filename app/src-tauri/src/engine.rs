@@ -18,6 +18,9 @@ use tauri::{AppHandle, Emitter};
 const LOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60); // a cold disk read of 30 GB of weights
 /// Longest silence between two events of a running frame (the first step includes encoding the prompt).
 const STEP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// A streamed model moves its whole weights through the GPU every step, and loads by writing them to disk first, so on a
+/// slow PC it can be quiet for a long time: those are waited for, much longer.
+const STREAM_PATIENCE: u32 = 6;
 /// How long Cancel waits for the worker to stop at a step boundary before killing it.
 const CANCEL_GRACE: Duration = Duration::from_secs(10);
 
@@ -107,7 +110,11 @@ impl Manager {
         if !install::is_installed(&paths.home, m) {
             return Err(format!("{} isn't downloaded yet (Models)", m.name));
         }
+        // Where a model streamed from disk keeps its weights while it is loaded; it goes when the worker does.
+        let scratch = paths.home.join("offload-cache");
+        let _ = std::fs::remove_dir_all(&scratch); // left behind by a worker that never got to clean up
         let mut envs = vec![
+            ("LATENT_OFFLOAD_DIR", scratch.to_string_lossy().to_string()),
             ("LATENT_DEVICE", crate::hw::torch_device(&paths.device).to_string()),
             ("HF_HUB_OFFLINE", "1".to_string()), // everything is on disk; loading never touches the network
             ("HF_HUB_DISABLE_SYMLINKS_WARNING", "1".to_string()),
@@ -121,16 +128,28 @@ impl Manager {
         let v = m.variants.iter().find(|v| v.id == variant).unwrap_or(&m.variants[0]);
         // A model that runs on another one's files is told where they are.
         let base = install::required(m).map(|b| install::model_dir(&paths.home, b).to_string_lossy().to_string());
-        let mut args = vec![m.family, &dir, v.offload, v.weights];
+        // On the CPU the whole model sits in RAM, so there is nothing to offload and no GPU memory to save with FP8.
+        let (offload, weights) = if paths.device == "cpu" { ("none", "bf16") } else { (v.offload, v.weights) };
+        let mut args = vec![m.family, &dir, offload, weights];
         args.extend(base.as_deref());
-        Worker::start(
+        let started = Worker::start(
             &install::python(&paths.home),
             &paths.workers.join("diffusion_worker.py"),
             &args,
             &envs,
             &paths.logs.join(format!("{}.log", m.id)),
-            LOAD_TIMEOUT,
-        )
+            LOAD_TIMEOUT * if v.streams() { STREAM_PATIENCE } else { 1 },
+        );
+        match started {
+            Ok(mut w) => {
+                w.scratch = Some(scratch);
+                Ok(w)
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&scratch);
+                Err(e)
+            }
+        }
     }
 
     /// Make `m` the resident model, unloading whatever was there.
@@ -214,7 +233,7 @@ impl Manager {
             *self.running.lock().unwrap() = Some((batch.to_string(), Some(id.clone())));
             emit_engine(app, m.id, "busy", None);
             let w = &slot.as_ref().unwrap().1;
-            let result = w.stream(&request, STEP_TIMEOUT, |p| {
+            let result = w.stream(&request, STEP_TIMEOUT * if variant.streams() { STREAM_PATIENCE } else { 1 }, |p| {
                 let _ = app.emit("progress", json!({
                     "batch": batch, "index": i, "step": p["step"], "steps": p["steps"],
                     "preview": p["preview"], "secPerStep": p["sec_per_step"],

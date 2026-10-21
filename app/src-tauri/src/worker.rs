@@ -103,6 +103,8 @@ pub struct Worker {
     stdin: Arc<Mutex<ChildStdin>>,
     rx: Receiver<Value>,
     pub hello: Value,
+    /// A folder this worker fills while it runs (a streamed model's weights); removed when the worker ends.
+    pub scratch: Option<std::path::PathBuf>,
 }
 
 impl Worker {
@@ -148,7 +150,7 @@ impl Worker {
                 }
             }
         });
-        let mut worker = Worker { child: Arc::new(Mutex::new(child)), stdin: Arc::new(Mutex::new(stdin)), rx, hello: Value::Null };
+        let mut worker = Worker { child: Arc::new(Mutex::new(child)), stdin: Arc::new(Mutex::new(stdin)), rx, hello: Value::Null, scratch: None };
         worker.hello = worker
             .wait_for("ready", ready_timeout)
             .map_err(|e| format!("{e} while loading (details in {})", log.display()))?;
@@ -210,6 +212,9 @@ impl Drop for Worker {
     fn drop(&mut self) {
         if let Ok(mut c) = self.child.lock() {
             kill_tree(&mut c);
+        }
+        if let Some(dir) = &self.scratch {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
