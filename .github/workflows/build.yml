@@ -51,7 +51,8 @@ jobs:
 
       - name: Check
         run: |
-          . "$HOME/.cargo/env" 2>/dev/null || true
+          # Only rustup installs have this file. Sourcing a missing one ends a POSIX shell (Arch's sh), even with `|| true`.
+          if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
           cargo check --manifest-path app/src-tauri/Cargo.toml
 
   macos:

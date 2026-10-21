@@ -22,7 +22,22 @@ env:
   CARGO_HTTP_MULTIPLEXING: false
 
 jobs:
+  # The builds compile for ten minutes and only fail at the very end if the updater signing key is missing ("A public
+  # key has been found, but no private key"). Check for it first, so a missing secret fails here, in seconds, with the fix.
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the updater signing key
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error title=Signing key missing::Add the repository secrets TAURI_SIGNING_PRIVATE_KEY (the contents of ~/.tauri/latent.key) and TAURI_SIGNING_PRIVATE_KEY_PASSWORD under Settings > Secrets and variables > Actions, then re-run this workflow. The key must be the private half of the pubkey in app/src-tauri/tauri.conf.json."
+            exit 1
+          fi
+
   windows:
+    needs: preflight
     runs-on: windows-latest
     defaults:
       run:
@@ -63,6 +78,7 @@ jobs:
 
   # .deb, .rpm and AppImage.
   linux:
+    needs: preflight
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -107,6 +123,7 @@ jobs:
   # macOS: an .app and a .dmg for Apple Silicon. Signing and notarization need the APPLE_* secrets; without
   # them the bundle is built unsigned. Remove continue-on-error once the first signed run has passed.
   macos:
+    needs: preflight
     runs-on: macos-latest
     continue-on-error: true
     defaults:

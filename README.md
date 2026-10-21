@@ -32,6 +32,7 @@
 | **One model in memory** | Switching models unloads the old one first, and idle models unload after a set time, so the GPU is free for everything else. |
 | **Nothing saved behind your back** | Frames stay in a temporary cache until you press Save (Ctrl+S) or Save as (Ctrl+Shift+S). PNG or JPEG. |
 | **Every frame keeps its recipe** | Model, prompt, size, seed and steps go into every saved PNG. Press R to reuse a frame's recipe, seed included. |
+| **Use it from another device** | Share Latent from Settings and open the link in a browser on your laptop or phone, while this PC's GPU does the work. On your home network, or anywhere through Tailscale. Off until you start it. |
 | **At home on Linux** | Native on Wayland and X11. With [Caelestia](https://github.com/caelestia-dots/shell), Latent follows your shell's live colors; on Hyprland it drops the title bar. |
 | **Tools** *(coming soon)* | Upscale 2x or 4x and remove backgrounds on any frame or photo, on your own hardware. |
 
@@ -46,7 +47,7 @@
 | **Any Linux** | `.AppImage` from Releases |
 | **Arch Linux** | `cd packaging/arch && makepkg -si` (builds the release set in `pkgver`) |
 
-Latent also needs **[uv](https://docs.astral.sh/uv/)** to download models, and enough disk for the ones you choose: 10 to 33 GB each.
+Latent also needs **[uv](https://docs.astral.sh/uv/)** to download models, and enough disk for the ones you choose: 7 to 33 GB each.
 
 ```bash
 winget install astral-sh.uv                        # Windows
@@ -77,6 +78,8 @@ On a Mac, use **Cmd** wherever this page says Ctrl.
 | **Qwen-Image 2.1 Turbo** | generate and edit, strong on text and layouts, 8 steps | 10.5 GB VRAM peak · about 20 s per image, 39 s per edit · 20 GB RAM | Qwen research license (**non-commercial**) | yes |
 | **FLUX.2 klein 4B** | generate and edit, 4 steps | 9.8 GB VRAM peak (6.2 GB as FP8 on 8 GB cards) · about 12 s per image or edit | Apache 2.0 | yes |
 | **SANA-Sprint 1.6B** | generate, 2 steps | 5.3 GB VRAM peak · about 7 s per image | Apache 2.0, Gemma terms for its text encoder | yes |
+| **Kromoss** | generate, 8 steps (a 5B MOSS-Image fine-tune with its turbo LoRA) | 13.7 GB VRAM peak (9.0 GB as FP8) · about 12 s per image | Apache 2.0 | yes |
+| **Qwen-Image 2.1 Uncensored** | generate and edit, 40 steps; **no content filter** | 10.5 GB VRAM peak · about 51 s per image, 107 s per edit · 7.1 GB download, runs on Qwen-Image 2.1 Turbo's text encoder and VAE | Qwen research license (**non-commercial**) | yes, needs Qwen-Image 2.1 Turbo first |
 | **Real-ESRGAN** | upscale | under 1 GB¹ | BSD-3-Clause | coming soon |
 | **BiRefNet** | remove background | about 2 GB¹ | MIT | coming soon |
 
@@ -133,6 +136,25 @@ The interface is plain HTML, CSS and JavaScript in the system web view. A small 
 </details>
 
 <details>
+<summary><b>Use Latent from another device</b></summary>
+
+Settings › **Use from another device** shares this PC's Latent with a browser on your laptop or phone: the interface runs there, the models run here. Nothing is shared until you press a button, and sharing stops when Latent closes.
+
+| | This network | Anywhere (Tailscale) |
+| --- | --- | --- |
+| **Reach** | Devices on the same Wi-Fi | Your own devices, from any network |
+| **Link** | `http://192.168.1.20:4877/pair?t=…` | `https://<this-pc>.<tailnet>.ts.net:8443/pair?t=…` |
+| **Setup** | Allow Latent through the firewall once | [Tailscale](https://tailscale.com/download) on both devices, same account. The first time, turn on HTTPS for your tailnet (Latent shows the link). On Linux, run `sudo tailscale set --operator=$USER` once |
+
+- **The link is the key.** It carries a secret that the browser keeps as a cookie, and anyone with it can use Latent on this PC, so send it only to your own devices. **New link** signs out every device that used the old one.
+- **This network isn't encrypted.** Its link is plain HTTP, so others on the same Wi-Fi could see your prompts and images, or copy the session. Use it only on a Wi-Fi you trust. Anywhere (Tailscale) is encrypted end to end.
+- **Closed to the internet.** On this network, Latent listens only on the home-network adapter, never on a connection plugged straight into the internet.
+- **In the browser,** Save downloads a frame to that device and Import uploads photos from it. Folders, the Hugging Face token and updates stay on this PC.
+- **Mimic and Latent can share at once:** they use different ports, and Latent's Tailscale address is on port 8443.
+
+</details>
+
+<details>
 <summary><b>Models folder and command-line downloads</b></summary>
 
 Models and their Python environment live in one folder (Settings › Models folder):
@@ -172,6 +194,8 @@ npx @tauri-apps/cli@2 build --bundles app,dmg            # macOS app and dmg
 
 The interface (`app/ui`) is packed into the app at build time, so run it again after editing it.
 
+`LATENT_DATA_DIR=<folder>` runs a separate copy with its own settings, sources, frames and sharing secret, for testing. (A second copy of the app would otherwise clear the first one's unsaved frames.)
+
 Releases come from GitHub Actions: push an annotated tag such as `v0.2.0` and `.github/workflows/release.yml` builds the Windows installer, the Linux `.deb`, `.rpm` and AppImage and the macOS `.dmg`, signs them and publishes one release with a `latest.json`. The tag's message becomes the release notes. Installed copies check that file on start and offer the update. Signing needs the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, the private half of the `pubkey` in `tauri.conf.json`; the macOS build is also signed and notarized when the `APPLE_*` secrets are set. Arch builds from the PKGBUILD are told about new versions but update through `makepkg`.
 
 <details>
@@ -195,10 +219,11 @@ Latent can edit photos of real people, so it can be misused. Edit your own photo
 
 - Images you save as PNG are marked as AI-generated in the file's metadata (JPEG has no place for it). When you share them, say so.
 - Each model's license applies to what you make with it; check it before commercial use.
+- **Qwen-Image 2.1 Uncensored** has no content filter, so what it makes depends only on your prompts. Latent warns you and asks before downloading it.
 
 ## Privacy
 
-Latent has no accounts and no telemetry. Your photos, prompts and images stay on your computer. It connects to the internet only to check GitHub for a new version when it starts and to download the models you ask for (PyPI, the PyTorch index and Hugging Face). Those services see the usual request details, such as your IP address.
+Latent has no accounts and no telemetry. Your photos, prompts and images stay on your computer, and on the devices you share Latent with if you turn sharing on. It connects to the internet only to check GitHub for a new version when it starts to download the models you ask for (PyPI, the PyTorch index and Hugging Face), and, when you turn sharing on, through Tailscale. Those services see the usual request details, such as your IP address.
 
 ## License
 

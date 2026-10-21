@@ -1,6 +1,7 @@
 """Diffusion worker for Latent. Run with diffusion-env python (-X utf8). Speaks JSON lines on stdin/stdout.
 
-Start args: <family> <model folder> <offload: none | text | model> <weights: bf16 | fp8>
+Start args: <family> <model folder> <offload: none | text | model> <weights: bf16 | fp8> [<base model folder>]
+  base:  the folder of the model this one runs on (its text encoder and VAE), for models that need one
   none:  everything on the GPU
   text:  the text encoder stays on the CPU (prompts are encoded once and cached); the rest stays on the GPU
   model: each part moves to the GPU only while it runs (least VRAM, slowest: weights cross PCIe every frame)
@@ -33,6 +34,7 @@ FAMILY = sys.argv[1]
 FOLDER = Path(sys.argv[2])
 OFFLOAD = sys.argv[3] if len(sys.argv) > 3 else "none"
 WEIGHTS = sys.argv[4] if len(sys.argv) > 4 else "bf16"
+BASE = Path(sys.argv[5]) if len(sys.argv) > 5 else None
 GIB = 1024 ** 3
 
 _out = threading.Lock()
@@ -298,16 +300,23 @@ class QwenImage21:
     # a step, measured), so it previews every other step to stay near 5 %.
     preview_every = 2
 
+    def load_transformer(self, dtype):
+        from diffusers import QwenImage21Transformer2DModel
+        return QwenImage21Transformer2DModel.from_pretrained(FOLDER / "transformer", dtype=dtype)
+
+    def load_pipeline(self, transformer, dtype):
+        from diffusers import QwenImage21Pipeline
+        return QwenImage21Pipeline.from_pretrained(FOLDER, transformer=transformer, dtype=dtype)
+
     def __init__(self, device, dtype):
         import gc
-        from diffusers import QwenImage21Pipeline, QwenImage21Transformer2DModel
         # The transformer loads and shrinks to FP8 before the text encoder arrives, so RAM never holds both at bf16.
-        transformer = QwenImage21Transformer2DModel.from_pretrained(FOLDER / "transformer", dtype=dtype)
+        transformer = self.load_transformer(dtype)
         store(transformer)
         if device != "cpu":
             transformer.to(device)
         gc.collect()
-        pipe = QwenImage21Pipeline.from_pretrained(FOLDER, transformer=transformer, dtype=dtype)
+        pipe = self.load_pipeline(transformer, dtype)
         pipe.set_progress_bar_config(disable=True)
         pipe.vae.enable_tiling()  # an edit encodes the reference and decodes the result; whole, that peaked at 15.9 GB
         pipe.vae.to(device)
@@ -334,12 +343,51 @@ class QwenImage21:
 
         return self.pipe(
             prompt=r["prompt"], image=[Image.open(p).convert("RGB") for p in sources] or None,
-            width=int(r["width"]), height=int(r["height"]), generator=generator,
+            width=int(r["width"]), height=int(r["height"]), generator=generator, num_inference_steps=steps,
             callback_on_step_end=callback, callback_on_step_end_tensor_inputs=["latents"],
         ).images[0]
 
     def release(self):
         pass
+
+
+class QwenImage21Uncensored(QwenImage21):
+    """Qwen-Image 2.1 Uncensored: the base (not Turbo) weights, quantized to FP8 by their maker, run on Qwen-Image 2.1
+    Turbo's text encoder, VAE and processor (the same files as the base model's, which is why that model is required).
+    40 steps without guidance, as the base model's card runs it."""
+
+    default_steps = 40
+    # Qwen/Qwen-Image-2.1's scheduler_config.json: it shifts its schedule with the image size, and has no saved sigmas.
+    SCHEDULER = dict(
+        base_image_seq_len=256, base_shift=0.5, invert_sigmas=False, max_image_seq_len=8192, max_shift=0.9,
+        num_train_timesteps=1000, shift=1.0, shift_terminal=0.02, stochastic_sampling=False, time_shift_type="exponential",
+        use_beta_sigmas=False, use_dynamic_shifting=True, use_exponential_sigmas=False, use_karras_sigmas=False)
+
+    def load_transformer(self, dtype):
+        """The file is in ComfyUI's scaled-FP8 format: each quantized weight has a per-tensor weight_scale. Dequantize
+        to bf16 here; store() shrinks the weights to FP8 again the way every other model's are."""
+        from accelerate import init_empty_weights
+        from diffusers import QwenImage21Transformer2DModel
+        from safetensors import safe_open
+        with init_empty_weights():  # the weights come from the file; buffers (rotary tables) are still built for real
+            transformer = QwenImage21Transformer2DModel.from_config(QwenImage21Transformer2DModel.load_config(BASE / "transformer"))
+        state = {}
+        with safe_open(FOLDER / "qwen-image-2.1-UC-fp8.safetensors", "pt") as f:
+            for key in f.keys():
+                if key.endswith((".weight_scale", ".comfy_quant")) or key == "scaled_fp8":
+                    continue
+                weight = f.get_tensor(key)
+                if weight.dtype == torch.float8_e4m3fn:
+                    weight = weight.float() * f.get_tensor(key[:-len("weight")] + "weight_scale")
+                state[key] = weight.to(dtype)
+        transformer.load_state_dict(state, assign=True)
+        return transformer
+
+    def load_pipeline(self, transformer, dtype):
+        from diffusers import FlowMatchEulerDiscreteScheduler, QwenImage21Pipeline
+        turbo = QwenImage21Pipeline.from_pretrained(BASE, transformer=transformer, dtype=dtype)
+        # A new pipeline around the same parts: Turbo's own would run its saved 8-step sigmas.
+        return QwenImage21Pipeline(**{**turbo.components, "scheduler": FlowMatchEulerDiscreteScheduler(**self.SCHEDULER)})
 
 
 class SanaSprint:
@@ -398,8 +446,66 @@ class SanaSprint:
         pass
 
 
+class Kromoss:
+    """Kromoss, a 5B MOSS-Image fine-tune, run the way its card recommends for speed: the DMD2 turbo LoRA at 8 steps and
+    guidance 1, so there is no negative branch. The pipeline is the vendored pipeline_moss_image.py, not repo code.
+    The 9B text encoder runs on the CPU."""
+
+    default_steps = 8
+
+    def __init__(self, device, dtype):
+        import gc
+        from diffusers import AutoencoderKLFlux2
+        from pipeline_moss_image import MOSSImagePipeline, MOSSImageScheduler, MOSSImageTransformer
+        from safetensors.torch import load_file
+        from transformers import AutoModel, AutoTokenizer
+        # The transformer goes to the GPU (as FP8 when asked) before the text encoder arrives, so RAM never holds both.
+        transformer = MOSSImageTransformer.from_pretrained(FOLDER / "transformer", torch_dtype=dtype).eval()
+        store(transformer)
+        if device != "cpu":
+            transformer.to(device)
+        gc.collect()
+        # The LoRA is applied unmerged, as its card says: its delta is close to bf16's rounding step.
+        lora = load_file(FOLDER / "8-steps-dmd2-lora.safetensors", device=device if device != "mps" else "cpu")
+        modules = dict(transformer.named_modules())
+        for key in [k for k in lora if k.endswith(".lora_down.weight")]:
+            name = key[len("diffusion_model."):-len(".lora_down.weight")]
+            down, up = lora[key].float(), lora[key.replace("lora_down", "lora_up")].float()
+            scale = lora[f"diffusion_model.{name}.alpha"].item() / down.shape[0]
+            modules[name].register_forward_hook(
+                lambda module, args, out, down=down, up=up, scale=scale: out + (scale * (args[0].float() @ down.T) @ up.T).to(out.dtype))
+        text_encoder = AutoModel.from_pretrained(FOLDER / "text_encoder", dtype=dtype).eval()
+        vae = AutoencoderKLFlux2.from_pretrained(FOLDER, subfolder="vae", torch_dtype=torch.float32).eval()
+        pipe = MOSSImagePipeline(transformer, MOSSImageScheduler(), text_encoder, AutoTokenizer.from_pretrained(FOLDER / "tokenizer"), vae)
+        pipe.set_progress_bar_config(disable=True)
+        vae.to(device)
+        if device == "cpu" or OFFLOAD == "none":
+            text_encoder.to(device)
+        else:
+            run_on_cpu(text_encoder)
+        self.pipe, self.vae, self.device = pipe, vae, pipe._execution_device
+        self.prompts = PromptCache(lambda prompt: pipe.encode_prompt(prompt))
+
+    def preview(self, latents, width, height):
+        # Unpacked latents (batch, channels, h, w), where the FLUX.2 VAE models above have packed tokens.
+        b, c, h, w = latents.shape
+        return flux2_preview(self.vae, latents.permute(0, 2, 3, 1).reshape(b, h * w, c), width, height)
+
+    def run(self, r, sources, steps, generator, on_step):
+        if sources:
+            raise ValueError("Kromoss makes new images; pick a model that can edit")
+        embeds, mask = self.prompts(r["prompt"])
+        return self.pipe(
+            prompt_embeds=embeds, prompt_attention_mask=mask, width=int(r["width"]), height=int(r["height"]),
+            num_inference_steps=steps, guidance_scale=1.0, generator=generator, callback_on_step_end=on_step,
+        ).images[0]
+
+    def release(self):
+        pass
+
+
 FAMILIES = {"zimage": ZImage, "flux3klein": Flux3Klein, "flux2klein": Flux2Klein, "qwenimage21": QwenImage21,
-            "sanasprint": SanaSprint}
+            "sanasprint": SanaSprint, "kromoss": Kromoss, "qwenimage21uc": QwenImage21Uncensored}
 
 
 # ---------------------------------------------------------------- previews

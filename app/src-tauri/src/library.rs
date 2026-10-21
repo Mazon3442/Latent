@@ -68,6 +68,13 @@ impl Library {
         Ok(Library { sources_dir, sources_file, frames_dir, sources: Mutex::new(sources), frames: Mutex::new(Vec::new()) })
     }
 
+    /// Whether `p` (already canonical) is one of the library's own images: a frame, its preview or thumbnail, or a
+    /// source. What a browser on another device may be shown.
+    pub fn serves(&self, p: &Path) -> bool {
+        let image = p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg"));
+        image && [&self.frames_dir, &self.sources_dir].iter().any(|d| d.canonicalize().is_ok_and(|d| p.starts_with(d)))
+    }
+
     pub fn sources(&self) -> Vec<Source> {
         self.sources.lock().unwrap().clone()
     }

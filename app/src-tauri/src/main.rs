@@ -7,6 +7,7 @@ mod hw;
 mod install;
 mod library;
 mod models;
+mod remote;
 mod store;
 mod worker;
 
@@ -34,6 +35,7 @@ struct App {
     library: Library,
     engines: Arc<Manager>,
     hw: Mutex<hw::Hardware>,
+    remote: remote::Remote,
 }
 
 type Shared = Arc<App>;
@@ -333,6 +335,90 @@ async fn save_frame_as(handle: AppHandle, app: State<'_, Shared>, id: String) ->
     .await
 }
 
+// ---------------------------------------------------------------- remote access
+
+#[tauri::command]
+fn remote_status(app: State<'_, Shared>) -> Value {
+    app.remote.status(&app)
+}
+
+#[tauri::command]
+async fn remote_start(handle: AppHandle, mode: String) -> Result<Value, String> {
+    blocking(move || remote::start(&handle, &mode)).await
+}
+
+#[tauri::command]
+async fn remote_stop(handle: AppHandle) -> Result<Value, String> {
+    blocking(move || Ok(remote::stop(&handle))).await
+}
+
+#[tauri::command]
+fn remote_new_link(handle: AppHandle) -> Result<Value, String> {
+    remote::new_link(&handle)
+}
+
+/// Opens one of Tailscale's pages (download, turning on HTTPS) in the browser, for the sharing setup guide.
+/// Only Tailscale's sites, so the window can't be made to open anything else.
+#[tauri::command]
+fn open_tailscale_page(url: String) -> Result<(), String> {
+    let allowed = ["https://tailscale.com/", "https://login.tailscale.com/"].iter().any(|p| url.starts_with(p));
+    if !allowed || url.chars().any(|c| c.is_whitespace() || c == '"') {
+        return Err("Latent only opens Tailscale's own pages.".into());
+    }
+    open_in_browser(&url)
+}
+
+/// Runs a UI command for a browser on another device. Commands that open windows on this PC, take its file paths or
+/// use its secrets aren't offered; remote.rs has browser versions of the ones that matter (upload, download).
+fn remote_call(h: &AppHandle, cmd: &str, args: Value) -> Result<Value, String> {
+    use tauri::async_runtime::block_on;
+    fn arg<T: serde::de::DeserializeOwned>(args: &Value, k: &str) -> Result<T, String> {
+        serde_json::from_value(args.get(k).cloned().unwrap_or(Value::Null)).map_err(|e| format!("{k}: {e}"))
+    }
+    fn to<T: serde::Serialize>(r: Result<T, String>) -> Result<Value, String> {
+        r.and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+    }
+    let app = || h.state::<Shared>();
+    match cmd {
+        "bootstrap" => {
+            let mut b = bootstrap(h.clone(), app());
+            b["remote"] = true.into();
+            b["settings"]["hfToken"] = "".into(); // the host's secret stays on the host
+            b["logs"] = "".into();
+            Ok(b)
+        }
+        "save_settings" => {
+            // Folders and the token belong to the host PC, so a browser can't change them.
+            let mut s: Settings = arg(&args, "settings")?;
+            let host = app().settings.lock().unwrap().clone();
+            (s.models_dir, s.save_dir, s.hf_token) = (host.models_dir, host.save_dir, host.hf_token);
+            to(save_settings(app(), s))
+        }
+        "install_model" => to(block_on(install_model(h.clone(), app(), arg(&args, "id")?))),
+        "remove_model" => to(block_on(remove_model(h.clone(), app(), arg(&args, "id")?))),
+        "preload" => to(block_on(preload(h.clone(), app(), arg(&args, "model")?, arg(&args, "variant")?)).map(|_| Value::Null)),
+        "unload" => to(block_on(unload(h.clone(), app())).map(|_| Value::Null)),
+        "generate" => to(generate(h.clone(), app(), arg(&args, "request")?)),
+        "cancel" => {
+            cancel(app(), arg(&args, "batch")?);
+            Ok(Value::Null)
+        }
+        "paste_source" => to(block_on(paste_source(app(), arg(&args, "png")?))),
+        "frame_to_source" => to(block_on(frame_to_source(app(), arg(&args, "frame")?))),
+        "delete_source" => to(delete_source(app(), arg(&args, "id")?).map(|_| Value::Null)),
+        "delete_frame" => {
+            delete_frame(app(), arg(&args, "id")?);
+            Ok(Value::Null)
+        }
+        "models_disk" => to(block_on(models_disk(app()))),
+        "ui_error" => {
+            ui_error(app(), format!("[remote] {}", arg::<String>(&args, "message")?));
+            Ok(Value::Null)
+        }
+        other => Err(format!("{other} only works on the PC running Latent.")),
+    }
+}
+
 #[tauri::command]
 fn delete_frame(app: State<'_, Shared>, id: String) {
     app.library.delete_frame(&id);
@@ -364,10 +450,17 @@ fn open_url(url: String) -> Result<(), String> {
     if !allowed_url(&url) {
         return Err("Latent only opens Hugging Face and GitHub pages.".into());
     }
+    open_in_browser(&url)
+}
+
+/// The caller has already checked the address.
+fn open_in_browser(url: &str) -> Result<(), String> {
     #[cfg(windows)]
-    let opened = std::process::Command::new("explorer").arg(&url).spawn();
-    #[cfg(unix)]
-    let opened = std::process::Command::new("xdg-open").arg(&url).spawn();
+    let opened = std::process::Command::new("explorer").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let opened = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let opened = std::process::Command::new("xdg-open").arg(url).spawn();
     opened.map(|_| ()).map_err(|e| format!("couldn't open the browser: {e}"))
 }
 
@@ -540,8 +633,12 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|tauri_app| {
             let handle = tauri_app.handle().clone();
-            let data = handle.path().app_data_dir()?;
-            let local = handle.path().app_local_data_dir()?;
+            // LATENT_DATA_DIR runs a separate copy with its own settings, sources, frames and sharing secret (for testing:
+            // a second copy would otherwise clear the first one's unsaved frames).
+            let (data, local) = match std::env::var_os("LATENT_DATA_DIR") {
+                Some(dir) => (PathBuf::from(&dir), PathBuf::from(dir).join("local")),
+                None => (handle.path().app_data_dir()?, handle.path().app_local_data_dir()?),
+            };
             let dirs = Dirs { resources: resources_dir(&handle), logs: local.join("logs"), settings: data.join("settings.json") };
             std::fs::create_dir_all(&dirs.logs)?;
             let settings: Settings = store::load(&dirs.settings);
@@ -555,7 +652,9 @@ fn main() {
                 library,
                 engines: Arc::new(Manager::default()),
                 hw: Mutex::new(first),
+                remote: remote::Remote::default(),
             });
+            remote::Remote::init(&handle);
             tauri_app.manage(app.clone());
 
             // Hyprland tiles windows and draws its own borders, so a GTK title bar would just waste space.
@@ -604,13 +703,15 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             bootstrap, save_settings, install_model, remove_model, preload, unload, generate, cancel,
             import_sources, paste_source, frame_to_source, delete_source, save_frame, save_frame_as, delete_frame,
-            pick_folder, reveal, ui_error, check_update, install_update, open_url, models_disk, test_hf_token
+            pick_folder, reveal, ui_error, check_update, install_update, open_url, models_disk, test_hf_token,
+            remote_status, remote_start, remote_stop, remote_new_link, open_tailscale_page
         ])
         .build(tauri::generate_context!())
         .expect("error while building Latent")
         .run(|handle, event| {
             if let RunEvent::Exit = event {
                 if let Some(app) = handle.try_state::<Shared>() {
+                    remote::stop(handle); // also takes Latent's route out of Tailscale
                     app.engines.unload(handle);
                     app.library.clear_frames();
                 }

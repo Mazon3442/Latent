@@ -16,6 +16,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.37"
 base64 = "0.22"
+# Remote access (remote.rs): the pairing secret, and finding this PC's home-network address.
+getrandom = "0.2"
+if-addrs = "0.15"
 # Sources: decode what people import or paste, scale it down, store it as PNG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 

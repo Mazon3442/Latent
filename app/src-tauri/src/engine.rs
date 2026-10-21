@@ -119,10 +119,14 @@ impl Manager {
         envs.extend(paths.device_env.iter().map(|(k, v)| (k.as_str(), v.clone())));
         let dir = install::model_dir(&paths.home, m).to_string_lossy().to_string();
         let v = m.variants.iter().find(|v| v.id == variant).unwrap_or(&m.variants[0]);
+        // A model that runs on another one's files is told where they are.
+        let base = install::required(m).map(|b| install::model_dir(&paths.home, b).to_string_lossy().to_string());
+        let mut args = vec![m.family, &dir, v.offload, v.weights];
+        args.extend(base.as_deref());
         Worker::start(
             &install::python(&paths.home),
             &paths.workers.join("diffusion_worker.py"),
-            &[m.family, &dir, v.offload, v.weights],
+            &args,
             &envs,
             &paths.logs.join(format!("{}.log", m.id)),
             LOAD_TIMEOUT,

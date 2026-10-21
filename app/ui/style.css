@@ -122,6 +122,19 @@ kbd { font: 500 11px/1 var(--ui); padding: 3px 5px; border-radius: var(--r-sm); 
 .col-head { display: flex; align-items: baseline; justify-content: space-between; padding: 22px 22px 10px; gap: 12px; }
 .col-head h2 { font: 600 15px/1.2 var(--ui); }
 .meta { color: var(--ink-3); font-size: 12px; font-weight: 400; }
+.meta.warn { color: var(--warn); }
+.share-note { font-size: 12px; color: var(--ink-3); line-height: 1.5; }
+.share-note b { color: var(--ink-2); font-weight: 600; }
+.share-error { font-size: 12px; color: var(--warn); line-height: 1.5; }
+.share-error .link, .share-help .link { font-size: 12px; font-weight: 600; color: var(--live); text-decoration: underline; text-underline-offset: 2px; padding: 0; }
+.share-help { font-size: 12px; color: var(--ink-2); }
+.share-help summary { cursor: pointer; color: var(--ink); font-weight: 500; }
+.share-help ol { margin: 8px 0; padding-left: 20px; display: grid; gap: 5px; }
+.share-help b { color: var(--ink); font-weight: 500; }
+.share-help p { color: var(--ink-3); }
+.share-help code { font-size: 11px; padding: 1px 5px; border-radius: 4px; background: var(--surface-3); user-select: all; }
+.share-link { display: flex; gap: 8px; }
+.share-link input { flex: 1; min-width: 0; padding: 6px 9px; background: var(--field); border: 1px solid var(--field-line); border-radius: var(--r); font-size: 13px; color: var(--ink); }
 .scroll { overflow-y: auto; min-height: 0; flex: 1; padding-bottom: 8px; }
 .col-note { color: var(--ink-3); font-size: 12px; padding: 12px 22px 18px; }
 

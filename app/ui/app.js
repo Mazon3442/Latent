@@ -1,7 +1,22 @@
-// Latent UI. Talks to the Rust core through Tauri commands and events (docs/PLAN.md section 5).
-// Built the way Mimic's is: the composer reads as a sentence, Controls slide in from the left, frames are takes.
-const { invoke, convertFileSrc: fileSrc } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
+// Latent UI. Talks to the Rust core through Tauri commands and events (docs/PLAN.md section 5). Opened in a browser on
+// another device (Settings › Use from another device), it sends the same commands and gets the same events over HTTP
+// (remote.rs). Built the way Mimic's is: the composer reads as a sentence, Controls slide in from the left, frames are takes.
+const REMOTE = !window.__TAURI__;
+const stream = REMOTE ? new EventSource("/api/events") : null;
+const invoke = REMOTE
+  ? async (cmd, args = {}) => {
+      const r = await fetch(`/api/${cmd}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(args) });
+      if (r.status === 401) { location.reload(); throw "This link was replaced. Open the new link from Latent."; }
+      const v = await r.json().catch(() => ({ error: `The PC running Latent didn't answer (${r.status}).` }));
+      if ("error" in v) throw v.error;
+      return v.ok;
+    }
+  : window.__TAURI__.core.invoke;
+// The window's drag-and-drop events don't exist in a browser; it uses the page's own drop events instead.
+const listen = REMOTE
+  ? (name, cb) => { if (!name.startsWith("tauri://")) stream.addEventListener(name, e => cb({ payload: JSON.parse(e.data) })); }
+  : window.__TAURI__.event.listen;
+const fileSrc = REMOTE ? path => `/api/file?path=${encodeURIComponent(path)}` : window.__TAURI__.core.convertFileSrc;
 
 // Script errors go to logs/ui.log, since a desktop window has no visible console.
 const trace = message => invoke("ui_error", { message });
@@ -190,9 +205,27 @@ function renderSources() {
     </button>`).join("");
 }
 
+// A browser has no file paths: photos are picked or dropped as files and uploaded to the PC running Latent.
+const pickPhotos = () => new Promise(resolve => {
+  const input = Object.assign(document.createElement("input"), { type: "file", multiple: true, accept: "image/png,image/jpeg,image/webp" });
+  input.onchange = () => resolve(input.files);
+  input.oncancel = () => resolve([]);
+  input.click();
+});
+async function uploadPhotos(files) {
+  const added = [];
+  for (const file of [...files].filter(f => f.type.startsWith("image/") || IMAGE.test(f.name))) {
+    const r = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
+    const v = await r.json().catch(() => ({ error: `The PC running Latent didn't answer (${r.status}).` }));
+    if ("error" in v) throw v.error;
+    added.push(v.ok);
+  }
+  return added;
+}
+
 async function importSources(paths) {
   try {
-    const added = await invoke("import_sources", { paths: paths ?? null });
+    const added = REMOTE ? await uploadPhotos(paths ?? await pickPhotos()) : await invoke("import_sources", { paths: paths ?? null });
     if (!added.length) return;
     state.sources = [...added.reverse(), ...state.sources];
     renderSources();
@@ -451,7 +484,11 @@ function installRow(m) {
   const failed = i?.phase === "failed" ? `<div class="preflight error">${esc(i.label)}</div>` : "";
   const copy = i?.phase === "failed" && i.command
     ? `<button class="btn small" data-copy="${esc(i.command)}">Copy install command</button>` : "";
-  return `${failed}<div class="row"><button class="btn small" data-install="${m.id}">${failed ? "Try again" : "Download"}</button>${copy}</div>`;
+  // A model that runs on another one's files can't be downloaded before that one.
+  const base = m.requires && state.models.find(x => x.id === m.requires);
+  const blocked = base && !base.installed;
+  const needs = blocked ? `<div class="meta">Runs on ${esc(base.name)}'s text encoder and VAE. Download that first.</div>` : "";
+  return `${failed}${needs}<div class="row"><button class="btn small" data-install="${m.id}"${blocked ? " disabled" : ""}>${failed ? "Try again" : "Download"}</button>${copy}</div>`;
 }
 
 /** The catalog again from the core, after a setting that changes which variant runs. */
@@ -461,6 +498,10 @@ async function refreshModels() {
 }
 
 async function installModel(id) {
+  const m = state.models.find(x => x.id === id);
+  if (m?.warning && !confirm(`${m.warning}
+
+Download ${m.name}?`)) return;
   state.installing[id] = { phase: "env", label: "Starting" };
   renderModels();
   try {
@@ -517,11 +558,11 @@ function renderFrames() {
     if (current) {
       detail = `<p class="take-text">${esc(prompt)}</p>`;
       if (!live && sel) {
-        detail += sel.saved ? `<p class="take-path">Saved to <button data-reveal>${esc(sel.saved)}</button></p>`
+        detail += sel.saved ? `<p class="take-path">Saved to ${REMOTE ? esc(sel.saved) : `<button data-reveal>${esc(sel.saved)}</button>`}</p>`
                             : `<p class="take-path">Frame ${sel.index + 1} · seed ${sel.seed} · ${sel.width} × ${sel.height} · made in ${sel.elapsed.toFixed(1)} s</p>`;
         detail += `<div class="take-actions">
           <button class="btn" data-act="save" ${sel.saved ? "disabled" : ""} title="Ctrl S">Save</button>
-          <button class="btn" data-act="saveas" title="Ctrl Shift S">Save as…</button>
+          ${REMOTE ? "" : '<button class="btn" data-act="saveas" title="Ctrl Shift S">Save as…</button>'}
           <button class="btn" data-act="reuse" title="Put this frame's prompt and settings back (R)">Reuse</button>
           <button class="btn" data-act="source" title="Edit this frame next (E)">Use as source</button>
           <button class="btn" data-act="delete" title="Delete">Delete</button></div>`;
@@ -554,6 +595,16 @@ function move(delta) {
 async function saveFrame(as = false) {
   const f = frame(state.selected);
   if (!f) return;
+  if (REMOTE) {
+    // The browser keeps the file on its own device; the PC's save folder isn't involved.
+    const a = Object.assign(document.createElement("a"), { href: `/api/download?id=${encodeURIComponent(f.id)}` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    f.saved = "this device";
+    log("Saved to this device's downloads.");
+    return renderFrames();
+  }
   try {
     const path = await invoke(as ? "save_frame_as" : "save_frame", { id: f.id });
     if (!path) return;
@@ -636,7 +687,8 @@ function renderModels() {
         ? `<div class="row"><button class="btn small pin" data-pin="${m.id}" aria-pressed="${isPinned(m.id)}" title="${isPinned(m.id) ? "Shown in the top bar" : "Show in the top bar"}">${isPinned(m.id) ? "Pinned" : "Pin to top bar"}</button>
             <span class="grow"></span><button class="quiet danger" data-remove="${m.id}">Remove</button></div>`
         : account + installRow(m);
-      return `<div class="model-card"><div class="title"><b>${esc(m.name)}</b><span class="fit-${v.fits}">${fit}</span></div>
+      const warning = m.warning ? `<div class="meta warn">${esc(m.warning)}</div>` : "";
+      return `<div class="model-card"><div class="title"><b>${esc(m.name)}</b><span class="fit-${v.fits}">${fit}</span></div>${warning}
         <div class="facts">${does} in ${m.options.steps.default} steps. ${gb(v.disk)} GB download · about ${gb(v.vram)} GB VRAM (${esc(v.label)}) ·
         ${esc(m.license)}${m.commercial ? "" : ", non-commercial"}</div>${action}</div>`;
     }).join("") + `<p class="meta">Models live in ${esc(state.settings.modelsDir)} <button class="info" data-help="modelsDir" aria-label="About the models folder" title="What's this?">i</button>. Removing one frees its disk space; Latent can download it again any time.</p>
@@ -746,7 +798,7 @@ function renderSettings() {
   const label = (text, key) => `<span>${text}${key ? " " + info(key) : ""}</span>`;
   const select = key => `<select data-set="${key}">${SELECTS[key].map(o => `<option${o === s[key] ? " selected" : ""}>${o}</option>`).join("")}</select>`;
   const toggle = key => `<input type="checkbox" class="switch" data-set="${key}"${s[key] ? " checked" : ""}>`;
-  const folder = (key, title) => `<div class="path"><input readonly value="${esc(s[key])}"><button class="btn small" data-folder="${key}" data-title="${title}">Change…</button></div>`;
+  const folder = (key, title) => `<div class="path"><input readonly value="${esc(s[key])}">${REMOTE ? "" : `<button class="btn small" data-folder="${key}" data-title="${title}">Change…</button>`}</div>`;
   $("#settingsBody").innerHTML = `
     <div class="set-group">Appearance</div>
     <label class="setting">${label(caelestia ? "Theme (Caelestia follows your shell's colors)" : "Theme")}${select("theme")}</label>
@@ -763,15 +815,73 @@ function renderSettings() {
     <label class="setting">${label("Run models on", "device")}${select("device")}</label>
     <label class="setting">${label("Unload an idle model after", "idle")}${select("idle")}</label>
     <label class="setting">${label("Load the last model on start", "preload")}${toggle("preload")}</label>
-    <div class="setting">${label("Hugging Face token", "hfToken")}
+    ${REMOTE ? "" : `<div class="setting">${label("Hugging Face token", "hfToken")}
       <div class="path"><input type="password" data-set="hfToken" value="${esc(s.hfToken)}" placeholder="Only for gated models" autocomplete="off" spellcheck="false">
       <button class="btn small" id="testTokenBtn"${s.hfToken ? "" : " disabled"}>Test</button></div></div>
-    <p class="meta token-result" id="tokenResult"></p>
+    <p class="meta token-result" id="tokenResult"></p>`}
+
+    ${REMOTE ? "" : shareSection()}
 
     <div class="set-group">About</div>
     <p class="meta">Latent ${esc(state.version)} · ${esc(state.hw?.gpu || "no GPU found")}${state.hw?.note ? " · " + esc(state.hw.note) : ""}</p>
-    <div class="row"><button class="btn small" id="checkUpdateBtn">Check for updates</button><button class="btn small" data-reveal-path="${esc(state.logs)}">Open logs folder</button></div>`;
+    ${REMOTE ? '<p class="meta">You are using Latent from another device. Folders, the Hugging Face token and updates stay on the PC running it.</p>'
+      : `<div class="row"><button class="btn small" id="checkUpdateBtn">Check for updates</button><button class="btn small" data-reveal-path="${esc(state.logs)}">Open logs folder</button></div>`}`;
 }
+
+// ---------- use from another device, as in Mimic ----------
+// Nothing is shared until one of these buttons is pressed. The link carries a secret; "New link" replaces it.
+let share = { on: false };
+function shareSection() {
+  const head = '<div class="set-group">Use from another device</div>';
+  if (!share.on) {
+    const busy = share.busy ? " disabled" : "";
+    return head + `<div class="setting"><span>Share this PC's Latent</span>
+        <div class="row"><button class="btn small" data-share="lan"${busy}>This network</button><button class="btn small" data-share="tailscale"${busy}>Anywhere (Tailscale)</button></div></div>`
+      + (share.error ? `<p class="share-error" role="alert">${withTailscaleLinks(share.error)}</p>`
+        : `<p class="share-note">${share.busy ? esc(share.busy) : "Open Latent in a browser on a laptop or phone, with this PC's GPU doing the work. Nothing is shared until you start it, and it stops when Latent closes. <b>This network</b> works on the same Wi-Fi but isn't encrypted: others on that Wi-Fi could see your prompts and images, or take over the session. <b>Anywhere</b> needs Tailscale signed in on both devices and is encrypted, so it's the one to use on shared Wi-Fi."}</p>`)
+      + tailscaleGuide();
+  }
+  const where = share.mode === "lan" ? "on this network" : "through Tailscale";
+  const who = share.devices === 1 ? "1 device is connected" : `${share.devices || "No"} devices are connected`;
+  const plain = share.mode === "lan" ? " This connection isn't encrypted, so use it only on a Wi-Fi you trust." : "";
+  return head + `<div class="setting"><span>Sharing ${where}</span><div class="row"><button class="btn small" data-share="stop">Stop sharing</button></div></div>
+    <p class="share-note">${who}. Anyone with the link can use Latent on this PC, including any model you've installed, so send it only to your own devices.${plain}</p>
+    <div class="share-link"><input readonly value="${esc(share.url)}" aria-label="Link"><button class="btn small" data-share="copy">Copy</button><button class="btn small" data-share="new" title="The old link stops working">New link</button></div>`;
+}
+// Tailscale's pages in an error ("Get it from https://tailscale.com/download") become buttons that open the browser.
+const withTailscaleLinks = text => esc(text).replace(/https:\/\/(login\.)?tailscale\.com\/[^\s"<]*[^\s"<.,]/g,
+  url => `<button class="link" data-tailscale="${url}">${url.includes("download") ? "Download Tailscale" : "Turn on HTTPS"}</button>`);
+// The button doesn't install Tailscale or sign anyone in (that needs an administrator and an account); it only gives
+// Latent an HTTPS address on the tailnet. This says what to do first. Open when Tailscale is the problem.
+function tailscaleGuide() {
+  const open = share.error && share.errorMode === "tailscale" ? "open" : "";
+  return `<details class="share-help" ${open}><summary>How to set up Anywhere (Tailscale)</summary><ol>
+    <li><b>Install Tailscale</b> on this PC and on your laptop or phone. <button class="link" data-tailscale="https://tailscale.com/download">Download Tailscale</button></li>
+    <li><b>Sign in with the same account</b> on both. Your devices can then reach each other from any network.</li>
+    ${state.platform === "linux" ? "<li><b>Let Latent set up sharing</b> by running this once: <code>sudo tailscale set --operator=$USER</code></li>" : ""}
+    <li><b>Press Anywhere (Tailscale).</b> The first time, Tailscale asks you to turn on HTTPS for your devices; Latent shows that link here.</li>
+  </ol><p>Latent doesn't install Tailscale or sign you in. It only adds an HTTPS address for itself while sharing is on (on port 8443, so it doesn't clash with Mimic), and removes it when you stop.</p></details>`;
+}
+async function shareAction(act) {
+  try {
+    if (act === "copy") {
+      await navigator.clipboard.writeText(share.url).catch(() => { $(".share-link input").select(); document.execCommand("copy"); });
+      return log("Copied the link. Open it on your other device.");
+    }
+    if (act === "lan" || act === "tailscale") {
+      share = { on: false, busy: act === "lan" ? "Starting…" : "Setting up Tailscale…" }; renderSettings();
+      share = await invoke("remote_start", { mode: act });
+      log("Sharing is on. Copy the link and open it on your other device.");
+    }
+    if (act === "stop") { share = await invoke("remote_stop"); log("Stopped sharing."); }
+    if (act === "new") { share = await invoke("remote_new_link"); log("Made a new link. The old one no longer works."); }
+  } catch (e) {
+    share = { ...(await invoke("remote_status")), error: String(e), errorMode: act };
+    log(String(e), "err");
+  }
+  renderSettings();
+}
+if (!REMOTE) listen("remote", ({ payload }) => { share = payload; if ($("#settingsDlg").classList.contains("open")) renderSettings(); });
 
 async function testToken() {
   const out = $("#tokenResult");
@@ -908,7 +1018,9 @@ document.addEventListener("click", async e => {
   }
   if (t.dataset.reveal !== undefined) return invoke("reveal", { path: frame(state.selected)?.saved });
   if (t.dataset.help) return openHelp(t.dataset.help);
-  if (t.dataset.url) return invoke("open_url", { url: t.dataset.url }).catch(err => log(String(err), "err"));
+  if (t.dataset.url) return REMOTE ? open(t.dataset.url, "_blank", "noopener,noreferrer") : invoke("open_url", { url: t.dataset.url }).catch(err => log(String(err), "err"));
+  if (t.dataset.share) return shareAction(t.dataset.share);
+  if (t.dataset.tailscale) return invoke("open_tailscale_page", { url: t.dataset.tailscale }).catch(err => log(String(err), "err"));
   if (t.dataset.revealPath) return invoke("reveal", { path: t.dataset.revealPath });
   if (t.id === "testTokenBtn") return testToken();
   if (t.dataset.openModels !== undefined) { openDialog("#modelsDlg"); return renderModels(); }
@@ -1036,6 +1148,10 @@ document.addEventListener("paste", async e => {
 });
 
 const IMAGE = /\.(png|jpe?g|webp)$/i;
+if (REMOTE) {
+  addEventListener("dragover", e => e.preventDefault());
+  addEventListener("drop", e => { e.preventDefault(); if (e.dataTransfer?.files.length) importSources(e.dataTransfer.files); });
+}
 listen("tauri://drag-drop", ({ payload }) => {
   const paths = (payload.paths || []).filter(p => IMAGE.test(p));
   if (paths.length) importSources(paths);
@@ -1108,7 +1224,7 @@ listen("log", ({ payload }) => log(payload));
 listen("caelestia", ({ payload }) => { caelestia = payload; if (state.settings?.theme === "Caelestia") applyTheme(); });
 listen("fallback", ({ payload }) => log(`Running on the CPU: this PyTorch can't use the ${payload.fallback?.wanted} GPU.`, "warn"));
 
-window.__TAURI__.window.getCurrentWindow().onCloseRequested(e => {
+if (!REMOTE) window.__TAURI__.window.getCurrentWindow().onCloseRequested(e => {
   const n = unsaved();
   if (state.settings?.warnUnsaved && n && !confirm(`${plural(n, "frame")} ${n > 1 ? "are" : "is"} not saved and will be lost. Close Latent anyway?`)) e.preventDefault();
 });
@@ -1118,6 +1234,8 @@ window.__TAURI__.window.getCurrentWindow().onCloseRequested(e => {
   const b = await invoke("bootstrap");
   Object.assign(state, { settings: b.settings, hw: b.hw, device: b.device, models: b.models, sources: b.sources, frames: b.frames, resident: b.resident, version: b.version, logs: b.logs, platform: b.platform });
   caelestia = b.caelestia || null;
+  if (REMOTE) document.title = "Latent (remote)";
+  else share = await invoke("remote_status");
   const list = installed();
   state.model = list.some(m => m.id === b.settings.lastModel) ? b.settings.lastModel : list[0]?.id ?? "";
   applyTheme();
@@ -1128,7 +1246,7 @@ window.__TAURI__.window.getCurrentWindow().onCloseRequested(e => {
   }
   log(list.length ? "Ready." : "Download a model to start.");
   $("#prompt").focus();
-  checkUpdate(true);
+  if (!REMOTE) checkUpdate(true);
   setTimeout(() => $("#splash").classList.add("out"), 450);
   setTimeout(() => $("#splash").remove(), 900);
 })();

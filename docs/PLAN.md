@@ -272,10 +272,24 @@ real peak the first time a model loads, as Mimic does.
 | **Qwen-Image 2.1 Turbo** | generate, edit, text and layouts, transparent PNG | 7B, 8-step saved schedule, run at 1024 px (the pipeline's default) | **measured:** transformer stored FP8 (7.3 GB), text encoder on the CPU (20 GB RAM), VAE tiled: 7.9 GB peak / ~20 s per image, 10.5 GB / ~39 s per edit. Untiled, edits hit 15.9 GB | Qwen research (non-commercial) | built |
 | **FLUX.2 klein 4B** | generate, edit | 4B, 4 steps | **measured:** 9.8 GB peak bf16, 6.2 GB as FP8 (8 GB cards); ~12 s per image or edit | Apache 2.0 | built, the small editor |
 | **SANA-Sprint 1.6B** | generate | 1.6B, 2 steps | **measured:** 5.3 GB peak, ~7 s per image | Apache 2.0 (+ Gemma terms) | built, the small generator |
+| **Kromoss** | generate | 5B, 8 steps with its DMD2 LoRA | **measured:** 13.7 GB peak (9.0 GB as FP8), ~12 s per image | Apache 2.0 | built; runs the vendored `engines/pipeline_moss_image.py`, never repo code |
+| **Qwen-Image 2.1 Uncensored** | generate, edit | 7B base weights (FP8 by [abenzerps](https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-Quantized)), 40 steps, no guidance | **measured:** 7.9 GB peak / ~51 s per image, 10.5 GB / ~107 s per edit | Qwen research (non-commercial); no content filter, so a warning and a confirmation before download | built; runs on Qwen-Image 2.1 Turbo's text encoder and VAE (`requires`), so it needs that model installed |
 | **SDXL 1.0** (+ community checkpoints, phase 3) | generate, inpaint | 3.5B | ~7-8 GB; CPU possible but slow | CreativeML OpenRAIL++-M | 8 GB GPUs, CPU |
 | FLUX.2 [dev] | generate, edit | 32B | 24 GB+ even at 4-bit | FLUX non-commercial | large GPUs only, later |
 | **Real-ESRGAN x4plus** (tool) | upscale 2x / 4x | 17M | < 1 GB | BSD-3 | everyone |
 | **BiRefNet** (tool) | remove background | ~220M | ~1-2 GB | MIT | everyone |
+
+### On hold: video
+
+Latent is images only for now. Video (LTX-2.5, `Lightricks/LTX-2.5`) was looked at and parked; nothing is built. What was found,
+so it can be picked up later:
+
+- The pinned diffusers already has LTX-2 text-to-video and image-to-video pipelines (`LTX2Pipeline`, `LTX2ImageToVideoPipeline`).
+- It is a 22B model that also makes audio. The Diffusers repo (`Lightricks/LTX-2.5-Diffusers`) is about 174 GB in full, gated,
+  and a 16 GB card would need FP8 and offloading; speed there is unmeasured.
+- It needs a `video` capability on models, clip length and frame-rate options, video frames and playback in the UI, MP4 saving,
+  a decision on audio, and a Responsible use update (video of real people raises the deepfake risk).
+- Suggested first scope when resumed: image-to-video from any frame ("use as source"), without audio.
 
 To check in phase 0: a credible CPU tier (SDXL with a few-step distillation, or a small model like Sana Sprint; licenses
 to confirm), whether a prompt rewriter (klein's text encoder is an instruct model, or a local LLM) is worth its time, and Blackwell (sm_120) support,
@@ -291,7 +305,7 @@ which needs PyTorch built for CUDA 12.8 or newer (Mimic's installer already pick
 6. **Tools.** Upscale and remove background, on any frame or source.
 7. **Inpaint.** Brush a mask on the canvas over a source; only that area changes.
 8. **Compare models.** One prompt through every installed model that fits, one at a time, as labelled batches.
-9. Later: LoRAs and community SDXL checkpoints, use from another device (Mimic's remote mode), command palette extras.
+9. Later: LoRAs and community SDXL checkpoints, command palette extras. Use from another device (Mimic's remote mode) is built: `remote.rs`, Settings › Use from another device. Video is on hold (see section 6).
 
 ### Settings (top-right, Ctrl+,)
 - **Appearance:** theme (dark / light / system; Caelestia on Linux as in Mimic).

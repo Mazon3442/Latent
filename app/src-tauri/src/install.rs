@@ -41,7 +41,12 @@ fn marker(home: &Path, m: &Model) -> PathBuf {
 }
 
 pub fn is_installed(home: &Path, m: &Model) -> bool {
-    marker(home, m).is_file() && python(home).is_file()
+    marker(home, m).is_file() && python(home).is_file() && required(m).is_none_or(|base| is_installed(home, base))
+}
+
+/// The model `m` runs on, if any.
+pub fn required(m: &Model) -> Option<&'static Model> {
+    m.requires.and_then(|id| crate::models::find(id).ok())
 }
 
 fn torch_args(device: &str) -> Vec<&'static str> {
@@ -123,6 +128,9 @@ pub fn folder_bytes(dir: &Path) -> u64 {
 /// Sets up the environment for `device` and downloads `m`. Safe to re-run: each step skips work that's done, and an
 /// interrupted download resumes.
 pub fn install(app: Option<&AppHandle>, home: &Path, logs: &Path, m: &Model, device: &str, hf_token: &str) -> Result<(), String> {
+    if let Some(base) = required(m).filter(|base| !is_installed(home, base)) {
+        return Err(format!("{} runs on {}. Download that first.", m.name, base.name));
+    }
     let uv = uv()?;
     let env = home.join(ENV);
     let py = python(home);

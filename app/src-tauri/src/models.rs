@@ -65,6 +65,10 @@ pub struct Model {
     pub variants: &'static [Variant],
     /// The repo is gated: downloading needs a free Hugging Face account that accepted the license, and its token.
     pub account: bool,
+    /// Another model this one runs on (its text encoder and VAE): it can only be downloaded and run while that one is installed.
+    pub requires: Option<&'static str>,
+    /// Shown before the download, and asks for confirmation.
+    pub warning: Option<&'static str>,
     #[serde(skip)]
     pub repo: &'static str,
     /// Folder under <models folder>/models.
@@ -94,6 +98,8 @@ pub const CATALOG: &[Model] = &[Model {
         Variant { id: "bf16-offload", label: "BF16, offloaded", vram: 12.3, ram: 22.0, disk: 32.9, offload: "model", weights: "bf16" },
     ],
     account: false,
+    requires: None,
+    warning: None,
     repo: "Tongyi-MAI/Z-Image-Turbo",
     folder: "Z-Image-Turbo",
     skip_files: &["assets/*", "*.pdf"],
@@ -116,6 +122,8 @@ pub const CATALOG: &[Model] = &[Model {
         Variant { id: "bf16-offload", label: "BF16, offloaded", vram: 11.0, ram: 22.0, disk: 20.4, offload: "model", weights: "bf16" },
     ],
     account: true,
+    requires: None,
+    warning: None,
     repo: "black-forest-labs/flux-3-image-klein",
     folder: "FLUX.3-klein",
     // The repo also holds single-file copies and FP8/NVFP4 variants for other tools; Latent loads the diffusers folders.
@@ -139,6 +147,8 @@ pub const CATALOG: &[Model] = &[Model {
     // text encoder reads the reference too). Untiled, an edit peaked at 15.9 GB.
     variants: &[Variant { id: "fp8-text-cpu", label: "FP8 weights, text encoder on the CPU", vram: 10.5, ram: 20.0, disk: 32.9, offload: "text", weights: "fp8" }],
     account: false,
+    requires: None,
+    warning: None,
     repo: "Qwen/Qwen-Image-2.1-Turbo",
     folder: "Qwen-Image-2.1-Turbo",
     skip_files: &["assets/*", "*.jpg", "*.png", "*.webp", "*.gif"],
@@ -161,6 +171,8 @@ pub const CATALOG: &[Model] = &[Model {
         Variant { id: "fp8-text-cpu", label: "FP8 weights, text encoder on the CPU", vram: 6.2, ram: 10.0, disk: 15.9, offload: "text", weights: "fp8" },
     ],
     account: false,
+    requires: None,
+    warning: None,
     repo: "black-forest-labs/FLUX.2-klein-4B",
     folder: "FLUX.2-klein-4B",
     skip_files: &["flux-2-klein-4b.safetensors", "assets/*", "*.jpg", "*.png"],
@@ -179,9 +191,62 @@ pub const CATALOG: &[Model] = &[Model {
     // Measured on an RTX 5070 Ti at 1024 x 1024, 2 steps, text encoder on the CPU: 5.3 GB peak, about 7 s per image.
     variants: &[Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 5.3, ram: 7.0, disk: 9.6, offload: "text", weights: "bf16" }],
     account: false,
+    requires: None,
+    warning: None,
     repo: "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
     folder: "SANA-Sprint-1.6B",
     skip_files: &["assets/*", "*.jpg", "*.png", "*.gif"],
+}, Model {
+    id: "kromoss",
+    name: "Kromoss",
+    family: "kromoss",
+    license: "Apache 2.0",
+    license_url: "https://huggingface.co/lodestones/Kromoss",
+    commercial: true,
+    can: Can { generate: true, edit: false, inpaint: false, multi_ref: false, negative: false },
+    sizes: &[("1:1", 1024, 1024), ("4:5", 896, 1120), ("3:2", 1248, 832), ("2:3", 832, 1248), ("16:9", 1344, 768), ("9:16", 768, 1344)],
+    grid: 16,
+    // Latent runs it with the card's 8-step DMD2 LoRA at guidance 1 (4 steps also works), not the 50-step, guidance 3
+    // full model, which needs a second forward per step.
+    options: Options { steps: Range { min: 4.0, max: 16.0, default: 8.0 }, guidance: None },
+    // Measured on an RTX 5070 Ti at 1024 x 1024, 8 steps, the 9B text encoder on the CPU (about 3 s for a new prompt, then
+    // cached): BF16 13.7 GB peak and about 12 s per image; FP8 9.0 GB peak and about 11 s. The 1.2 GB LoRA is part of both.
+    // RAM is the encoder's 17 GB plus headroom, not measured.
+    variants: &[
+        Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 13.7, ram: 20.0, disk: 28.4, offload: "text", weights: "bf16" },
+        Variant { id: "fp8-text-cpu", label: "FP8 weights, text encoder on the CPU", vram: 9.0, ram: 20.0, disk: 28.4, offload: "text", weights: "fp8" },
+    ],
+    account: false,
+    requires: None,
+    warning: None,
+    repo: "lodestones/Kromoss",
+    folder: "Kromoss",
+    // Latent runs the vendored pipeline in engines/, so none of the repo's code is downloaded. The single-file copies,
+    // the ComfyUI text encoder and the second LoRA are for other tools.
+    skip_files: &["*.py", "assets/*", "diffusion_models/*", "text_encoders/*", "vae/flux2-vae_small.safetensors", "8-steps-dmd-lora.safetensors", "*.webp"],
+}, Model {
+    id: "qwen-image-2.1-uncensored",
+    name: "Qwen-Image 2.1 Uncensored",
+    family: "qwenimage21uc",
+    license: "Qwen research license (non-commercial)",
+    license_url: "https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-Quantized",
+    commercial: false,
+    can: Can { generate: true, edit: true, inpaint: false, multi_ref: false, negative: false },
+    sizes: &[("1:1", 1024, 1024), ("4:3", 1200, 896), ("3:4", 896, 1200), ("3:2", 1264, 848), ("2:3", 848, 1264), ("16:9", 1376, 768), ("9:16", 768, 1376)],
+    grid: 16,
+    // The base Qwen-Image 2.1 weights (not the distilled Turbo): the model card runs 40 steps, without guidance.
+    options: Options { steps: Range { min: 20.0, max: 50.0, default: 40.0 }, guidance: None },
+    // Only the FP8 transformer (7.1 GB) is downloaded: the text encoder, VAE and processor come from Qwen-Image 2.1 Turbo,
+    // which is why that model is required. Measured on an RTX 5070 Ti at 1024 x 1024, 40 steps, text encoder on the CPU:
+    // 7.9 GB peak and about 51 s per new image; 10.5 GB and about 107 s per edit.
+    variants: &[Variant { id: "fp8-text-cpu", label: "FP8 weights, text encoder on the CPU", vram: 10.5, ram: 20.0, disk: 7.1, offload: "text", weights: "fp8" }],
+    account: false,
+    requires: Some("qwen-image-2.1-turbo"),
+    warning: Some("This model has no content filter. It makes adult and sensitive images without refusing, so what it makes depends only on your prompts. Only make images of real people with their permission: you're responsible for what you make. Its license is non-commercial."),
+    repo: "abenzerps/Qwen-Image-2.1-Uncensored-Quantized",
+    folder: "Qwen-Image-2.1-Uncensored",
+    // The repo holds every quantization and the ComfyUI text encoder and VAE; Latent loads one FP8 file.
+    skip_files: &["*.gguf", "*NVFP4*", "*MLX*", "*int8_convrot*", "*lora*", "text_encoders/*", "vae/*", "assets/*", "SHA256SUMS"],
 }];
 
 pub fn find(id: &str) -> Result<&'static Model, String> {
