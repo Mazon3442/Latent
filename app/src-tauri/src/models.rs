@@ -188,9 +188,15 @@ pub fn find(id: &str) -> Result<&'static Model, String> {
     CATALOG.iter().find(|m| m.id == id).ok_or_else(|| format!("Latent doesn't know a model called {id}"))
 }
 
-/// Whether a variant fits a PC with `have` GB of VRAM (on a GPU) or RAM (on the CPU).
+/// Whether a variant fits a PC with `have` GB of VRAM (on a GPU) or RAM (on the CPU). A unified-memory Mac (a GPU
+/// with no VRAM figure of its own) holds the whole model, GPU and CPU parts alike, in RAM, and Metal can't store FP8
+/// weights, so FP8 variants don't run there.
 pub fn fits(v: &Variant, on_gpu: bool, vram_total: f64, ram_total: f64) -> &'static str {
-    let (need, have) = if on_gpu { (v.vram, vram_total) } else { (v.ram, ram_total) };
+    let unified = on_gpu && vram_total <= 0.0;
+    if unified && v.weights == "fp8" {
+        return "no";
+    }
+    let (need, have) = if unified { (v.vram + v.ram, ram_total) } else if on_gpu { (v.vram, vram_total) } else { (v.ram, ram_total) };
     if have <= 0.0 || need <= have - 1.0 { "yes" } else if need <= have { "tight" } else { "no" }
 }
 
@@ -202,8 +208,9 @@ impl Model {
             return v;
         }
         if lightest {
-            let need = |v: &&Variant| if on_gpu { v.vram } else { v.ram };
-            return self.variants.iter().min_by(|a, b| need(a).total_cmp(&need(b))).unwrap_or(&self.variants[0]);
+            let need = |v: &&Variant| if on_gpu && vram_total <= 0.0 { v.vram + v.ram } else if on_gpu { v.vram } else { v.ram };
+            let usable = self.variants.iter().filter(|v| fits(v, on_gpu, vram_total, ram_total) != "no");
+            return usable.min_by(|a, b| need(a).total_cmp(&need(b))).unwrap_or(&self.variants[0]);
         }
         ["yes", "tight"]
             .iter()
@@ -225,5 +232,10 @@ mod tests {
         let k = find("flux2-klein-4b").unwrap();
         assert_eq!(k.variant(None, true, 15.9, 31.0, false).id, "bf16-text-cpu", "full quality when it fits");
         assert_eq!(k.variant(None, true, 15.9, 31.0, true).id, "fp8-text-cpu", "Prefer less VRAM takes the lightest");
+        // A Mac (unified memory, no VRAM figure) holds klein 4B whole in RAM, and can't use FP8 weights.
+        assert_eq!(fits(&k.variants[0], true, 0.0, 16.0), "no", "9.8 + 10 GB is more than a 16 GB Mac has");
+        assert_eq!(fits(&k.variants[0], true, 0.0, 32.0), "yes");
+        assert_eq!(fits(&k.variants[1], true, 0.0, 64.0), "no", "Metal can't store FP8");
+        assert_eq!(k.variant(None, true, 0.0, 32.0, true).id, "bf16-text-cpu", "Prefer less VRAM never picks FP8 on a Mac");
     }
 }

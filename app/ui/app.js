@@ -70,10 +70,31 @@ function saveSettings() {
   saveTimer = setTimeout(() => invoke("save_settings", { settings: state.settings }).catch(e => log(String(e), "err")), 300);
 }
 
+// Caelestia's live Material You scheme (read from ~/.local/state/caelestia/scheme.json by the core), mapped onto
+// Latent's tokens as in Mimic. Its primary color takes the accent's place.
+let caelestia = null;
+const CAELESTIA_MAP = {
+  "--ground": "surface", "--surface": "surfaceContainerLow", "--surface-2": "surfaceContainer", "--surface-3": "surfaceContainerHighest",
+  "--ink": "onSurface", "--ink-2": "onSurfaceVariant", "--ink-3": "outline", "--live": "primary", "--live-ink": "onPrimary",
+  "--ready": "tertiary", "--warn": "error", "--danger": "error", "--field": "surfaceContainerLowest", "--field-line": "outlineVariant",
+  "--checker": "surfaceContainer",
+};
+
+function applyCaelestia(on) {
+  const root = document.documentElement.style;
+  for (const [token, key] of Object.entries(CAELESTIA_MAP)) {
+    const value = on && caelestia?.colors?.[key];
+    value ? root.setProperty(token, value) : root.removeProperty(token);
+  }
+}
+
 function applyTheme() {
   const t = state.settings.theme;
-  const light = t === "Light" || (t === "System" && matchMedia("(prefers-color-scheme: light)").matches);
+  const useCaelestia = t === "Caelestia" && caelestia;
+  const light = useCaelestia ? caelestia.mode === "light"
+    : t === "Light" || (t === "System" && matchMedia("(prefers-color-scheme: light)").matches);
   document.documentElement.dataset.theme = light ? "light" : "dark";
+  applyCaelestia(useCaelestia);
 }
 matchMedia("(prefers-color-scheme: light)").addEventListener("change", applyTheme);
 
@@ -608,7 +629,7 @@ function renderModels() {
 }
 
 const SELECTS = {
-  theme: ["Dark", "Light", "System"],
+  get theme() { return caelestia ? ["Caelestia", "Dark", "Light", "System"] : ["Dark", "Light", "System"]; },
   promptSize: ["Small", "Medium", "Large"],
   format: ["PNG", "JPEG"],
   idle: ["5 minutes", "10 minutes", "30 minutes", "Never"],
@@ -711,7 +732,7 @@ function renderSettings() {
   const folder = (key, title) => `<div class="path"><input readonly value="${esc(s[key])}"><button class="btn small" data-folder="${key}" data-title="${title}">Change…</button></div>`;
   $("#settingsBody").innerHTML = `
     <div class="set-group">Appearance</div>
-    <label class="setting">${label("Theme")}${select("theme")}</label>
+    <label class="setting">${label(caelestia ? "Theme (Caelestia follows your shell's colors)" : "Theme")}${select("theme")}</label>
     <label class="setting">${label("Prompt text size")}${select("promptSize")}</label>
 
     <div class="set-group">Saving</div>
@@ -783,10 +804,15 @@ async function checkUpdate(quiet) {
 function openUpdate() {
   if (!update) return;
   const n = unsaved();
-  $("#upTitle").textContent = `Latent ${update.version} is ready to install`;
-  $("#upCurrent").textContent = `You have ${update.current}. Latent downloads the new version, installs it and opens again.`;
+  const pm = update.packageManager; // e.g. "pacman": that package manager updates Latent, not Latent itself
+  $("#upTitle").textContent = pm ? `Latent ${update.version} is out` : `Latent ${update.version} is ready to install`;
+  $("#upCurrent").textContent = pm
+    ? `You have ${update.current}, installed with ${pm}. Update it the same way: set pkgver=${update.version} in packaging/arch/PKGBUILD, then run makepkg -si there.`
+    : `You have ${update.current}. Latent downloads the new version, installs it and opens again.`;
+  $("#upInstall").hidden = !!pm;
+  $("#upLater").textContent = pm ? "Close" : "Later";
   $("#upNotes").innerHTML = notesHtml(update.notes || "");
-  $("#upWarn").hidden = !n;
+  $("#upWarn").hidden = !n || !!pm;
   $("#upWarn").textContent = `${plural(n, "unsaved frame")} ${n === 1 ? "is" : "are"} cleared when Latent restarts. Save ${n === 1 ? "it" : "them"} first if you want to keep ${n === 1 ? "it" : "them"}.`;
   $("#upStatus").textContent = "";
   $(".up-progress").hidden = true;
@@ -1061,6 +1087,7 @@ listen("install", ({ payload: p }) => {
 });
 
 listen("log", ({ payload }) => log(payload));
+listen("caelestia", ({ payload }) => { caelestia = payload; if (state.settings?.theme === "Caelestia") applyTheme(); });
 listen("fallback", ({ payload }) => log(`Running on the CPU: this PyTorch can't use the ${payload.fallback?.wanted} GPU.`, "warn"));
 
 window.__TAURI__.window.getCurrentWindow().onCloseRequested(e => {
@@ -1071,7 +1098,8 @@ window.__TAURI__.window.getCurrentWindow().onCloseRequested(e => {
 // ---------- start ----------
 (async () => {
   const b = await invoke("bootstrap");
-  Object.assign(state, { settings: b.settings, hw: b.hw, device: b.device, models: b.models, sources: b.sources, frames: b.frames, resident: b.resident, version: b.version, logs: b.logs });
+  Object.assign(state, { settings: b.settings, hw: b.hw, device: b.device, models: b.models, sources: b.sources, frames: b.frames, resident: b.resident, version: b.version, logs: b.logs, platform: b.platform });
+  caelestia = b.caelestia || null;
   const list = installed();
   state.model = list.some(m => m.id === b.settings.lastModel) ? b.settings.lastModel : list[0]?.id ?? "";
   applyTheme();

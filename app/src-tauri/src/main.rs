@@ -1,6 +1,7 @@
 // No console window behind the app in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod caelestia;
 mod engine;
 mod hw;
 mod install;
@@ -107,6 +108,7 @@ fn bootstrap(handle: AppHandle, app: State<'_, Shared>) -> Value {
         "resident": app.engines.resident(),
         "logs": app.dirs.logs,
         "platform": std::env::consts::OS,
+        "caelestia": caelestia::read(),
     })
 }
 
@@ -426,6 +428,10 @@ fn ui_error(app: State<'_, Shared>, message: String) {
 
 // ---------------------------------------------------------------- updates
 
+/// The package manager that owns this install when a distro package built it (set by packaging/arch/PKGBUILD).
+/// Such installs hear about new versions but get them from that package manager, not from the updater.
+const PACKAGE_MANAGER: Option<&str> = option_env!("LATENT_PACKAGE");
+
 /// The newest GitHub release, if it's newer than this build. Development builds never offer one.
 #[tauri::command]
 async fn check_update(handle: AppHandle) -> Result<Option<Value>, String> {
@@ -433,12 +439,18 @@ async fn check_update(handle: AppHandle) -> Result<Option<Value>, String> {
         return Ok(None);
     }
     let update = handle.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| format!("Couldn't check for updates: {e}"))?;
-    Ok(update.map(|u| json!({ "version": u.version, "current": u.current_version, "notes": u.body.clone().unwrap_or_default() })))
+    Ok(update.map(|u| json!({
+        "version": u.version, "current": u.current_version, "notes": u.body.clone().unwrap_or_default(),
+        "packageManager": PACKAGE_MANAGER,
+    })))
 }
 
 /// Download the newest release, install it and restart into it. Progress arrives as "update-progress" events.
 #[tauri::command]
 async fn install_update(handle: AppHandle) -> Result<(), String> {
+    if let Some(manager) = PACKAGE_MANAGER {
+        return Err(format!("This copy of Latent was installed with {manager}. Update it there."));
+    }
     let update = handle
         .updater()
         .map_err(|e| e.to_string())?
@@ -535,9 +547,25 @@ fn main() {
             });
             tauri_app.manage(app.clone());
 
+            // Hyprland tiles windows and draws its own borders, so a GTK title bar would just waste space.
+            #[cfg(target_os = "linux")]
+            if let Some(win) = handle.get_webview_window("main") {
+                let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+                if desktop.contains("hyprland") || std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+                    let _ = win.set_decorations(false);
+                }
+            }
+
             // Hardware every 2 s, and the idle-unload check.
             let h = handle.clone();
+            let mut scheme_seen = caelestia::modified();
             std::thread::spawn(move || loop {
+                // Caelestia rewrites its scheme when the wallpaper changes; Latent re-colors with it.
+                let scheme_now = caelestia::modified();
+                if scheme_now != scheme_seen {
+                    scheme_seen = scheme_now;
+                    let _ = h.emit("caelestia", caelestia::read());
+                }
                 let snap = hw::snapshot(&mut sys);
                 *app.hw.lock().unwrap() = snap.clone();
                 let minutes = app.settings.lock().unwrap().idle_minutes();

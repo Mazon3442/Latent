@@ -44,6 +44,9 @@ pub fn is_installed(home: &Path, m: &Model) -> bool {
 }
 
 fn torch_args(device: &str) -> Vec<&'static str> {
+    if cfg!(target_os = "macos") {
+        return vec![TORCH, TORCHVISION]; // PyPI's macOS builds include Metal (mps)
+    }
     let index = match device {
         "cuda" => "https://download.pytorch.org/whl/cu128", // includes RTX 50-series (Blackwell)
         "rocm" => "https://download.pytorch.org/whl/rocm7.2",

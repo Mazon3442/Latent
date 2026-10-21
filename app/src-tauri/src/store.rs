@@ -38,7 +38,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            theme: "Dark".into(),
+            // With the Caelestia shell, Latent follows its live colors from the start.
+            theme: if crate::caelestia::scheme_path().is_file() { "Caelestia".into() } else { "Dark".into() },
             save_dir: default_save_dir(),
             warn_unsaved: true,
             models_dir: default_models_dir(),

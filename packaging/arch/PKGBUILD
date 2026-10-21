@@ -1,0 +1,36 @@
+# Builds Latent from a tagged release. Usage, in this folder:  makepkg -si
+# Bump pkgver to the tag you want (without the "v").
+pkgname=latent
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Local image generation and editing: Z-Image, FLUX klein, Qwen-Image and more, on your own GPU"
+arch=('x86_64')
+url="https://github.com/Mazon3442/Latent"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'uv' 'xdg-utils')
+makedepends=('rust' 'cargo' 'nodejs' 'npm' 'libarchive')
+optdepends=(
+  'pciutils: show the GPU model (used to decide GPU or CPU)'
+  'nvidia-utils: VRAM readout and CUDA on NVIDIA GPUs'
+  'xdg-user-dirs: save frames to your Pictures folder'
+)
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "Latent-$pkgver/app/src-tauri"
+  export CARGO_TARGET_DIR=target
+  # The .deb bundle has the binary, the model worker, the desktop entry and the icons laid out the way Latent
+  # expects; package() unpacks it. LATENT_PACKAGE tells Latent that pacman owns this install, so it points to
+  # makepkg for new versions instead of installing over pacman's files itself.
+  LATENT_PACKAGE=pacman npx --yes @tauri-apps/cli@2 build --bundles deb --config "{\"version\":\"$pkgver\"}"
+}
+
+package() {
+  cd "Latent-$pkgver/app/src-tauri/target/release/bundle/deb"
+  local deb
+  deb=$(ls ./*.deb | head -n1)
+  bsdtar -xOf "$deb" 'data.tar.*' | bsdtar -xf - -C "$pkgdir"
+  install -Dm644 "$srcdir/Latent-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
