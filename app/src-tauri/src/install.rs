@@ -21,6 +21,9 @@ const PACKAGES: &[&str] = &[
     "transformers>=4.57", "accelerate", "safetensors", "pillow", "huggingface_hub",
 ];
 const TORCH: &str = "torch==2.11.*";
+/// FLUX.3 klein's text encoder (Qwen3-VL) loads its image and video processors through torchvision. From the same
+/// index as torch, so the two are built for each other.
+const TORCHVISION: &str = "torchvision==0.26.*";
 
 pub fn python(home: &Path) -> PathBuf {
     venv_python(&home.join(ENV))
@@ -47,7 +50,7 @@ fn torch_args(device: &str) -> Vec<&'static str> {
         "xpu" => "https://download.pytorch.org/whl/xpu",
         _ => "https://download.pytorch.org/whl/cpu",
     };
-    vec![TORCH, "--index-url", index]
+    vec![TORCH, TORCHVISION, "--index-url", index]
 }
 
 fn uv() -> Result<PathBuf, String> {

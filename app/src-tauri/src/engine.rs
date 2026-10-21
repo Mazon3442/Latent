@@ -62,9 +62,10 @@ impl GenRequest {
         if !(1..=8).contains(&self.count) {
             return Err("A batch is 1 to 8 frames".into());
         }
+        let largest = m.sizes.iter().map(|s| s.1.max(s.2)).max().unwrap_or(2048);
         for side in [self.width, self.height] {
-            if !(256..=2048).contains(&side) || side % m.grid != 0 {
-                return Err(format!("{} needs sizes from 256 to 2048 px in steps of {}", m.name, m.grid));
+            if !(256..=largest).contains(&side) || side % m.grid != 0 {
+                return Err(format!("{} needs sizes from 256 to {largest} px in steps of {}", m.name, m.grid));
             }
         }
         if !self.sources.is_empty() && !m.can.edit {
@@ -113,11 +114,11 @@ impl Manager {
         ];
         envs.extend(paths.device_env.iter().map(|(k, v)| (k.as_str(), v.clone())));
         let dir = install::model_dir(&paths.home, m).to_string_lossy().to_string();
-        let offload = m.variants.iter().find(|v| v.id == variant).map(|v| v.offload).unwrap_or(m.variants[0].offload);
+        let v = m.variants.iter().find(|v| v.id == variant).unwrap_or(&m.variants[0]);
         Worker::start(
             &install::python(&paths.home),
             &paths.workers.join("diffusion_worker.py"),
-            &[m.family, &dir, offload],
+            &[m.family, &dir, v.offload, v.weights],
             &envs,
             &paths.logs.join(format!("{}.log", m.id)),
             LOAD_TIMEOUT,

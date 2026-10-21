@@ -268,16 +268,17 @@ real peak the first time a model loads, as Mimic does.
 | Model | Does | Size | Memory (estimate) | License | Tier |
 | --- | --- | --- | --- | --- | --- |
 | **Z-Image Turbo** | generate | 6B, 9 steps | **measured:** 14.2 GB VRAM peak, ~13 s per 1024² frame, text encoder on the CPU (4 s per new prompt, cached); fully offloaded 12.3 GB but ~30 s per frame and 20 GB of RAM | Apache 2.0 | built, default on 16 GB |
-| **FLUX.2 [klein] 4B** | generate, edit, multi-reference | 4B | ~8-13 GB | Apache 2.0 | default editor, 12 GB+ |
-| **Qwen-Image-Edit** | edit (strong on text and objects) | 20B | 20 GB+ bf16; fits 16 GB only quantized + offloaded | Apache 2.0 | 16 GB, quantized |
+| **FLUX.3 klein** | generate, edit, up to 10 references | 5.6B, 16 steps | **measured:** 12.9 GB VRAM peak, ~17 s per image and ~33 s per one-reference edit, text encoder on the CPU. Runs without BFL's 9B prompt upsampler (too big beside it on 16 GB); prompts work best as full scene descriptions | FLUX Kommunity (commercial under US$5M revenue), gated | built, the editor |
+| **Qwen-Image 2.1 Turbo** | generate, edit, text and layouts, transparent PNG | 7B, 8-step saved schedule, run at 1024 px (the pipeline's default) | **measured:** transformer stored FP8 (7.3 GB), text encoder on the CPU (20 GB RAM), VAE tiled: 7.9 GB peak / ~20 s per image, 10.5 GB / ~39 s per edit. Untiled, edits hit 15.9 GB | Qwen research (non-commercial) | built |
+| **FLUX.2 klein 4B** | generate, edit | 4B, 4 steps | **measured:** 9.8 GB peak bf16, 6.2 GB as FP8 (8 GB cards); ~12 s per image or edit | Apache 2.0 | built, the small editor |
+| **SANA-Sprint 1.6B** | generate | 1.6B, 2 steps | **measured:** 5.3 GB peak, ~7 s per image | Apache 2.0 (+ Gemma terms) | built, the small generator |
 | **SDXL 1.0** (+ community checkpoints, phase 3) | generate, inpaint | 3.5B | ~7-8 GB; CPU possible but slow | CreativeML OpenRAIL++-M | 8 GB GPUs, CPU |
-| FLUX.2 [klein] 9B | generate, edit | 9B | ~20 GB+ unquantized | check model card (non-commercial terms) | later |
 | FLUX.2 [dev] | generate, edit | 32B | 24 GB+ even at 4-bit | FLUX non-commercial | large GPUs only, later |
 | **Real-ESRGAN x4plus** (tool) | upscale 2x / 4x | 17M | < 1 GB | BSD-3 | everyone |
 | **BiRefNet** (tool) | remove background | ~220M | ~1-2 GB | MIT | everyone |
 
 To check in phase 0: a credible CPU tier (SDXL with a few-step distillation, or a small model like Sana Sprint; licenses
-to confirm), whether klein's edit quality makes Qwen-Image-Edit unnecessary on 16 GB, and Blackwell (sm_120) support,
+to confirm), whether a prompt rewriter (klein's text encoder is an instruct model, or a local LLM) is worth its time, and Blackwell (sm_120) support,
 which needs PyTorch built for CUDA 12.8 or newer (Mimic's installer already picks that index).
 
 ## 7. Features, in priority order
@@ -320,7 +321,7 @@ which needs PyTorch built for CUDA 12.8 or newer (Mimic's installer already pick
 
 **Phase 1: generate.** Rust core from Mimic's modules, installer, model manager, generate loop, contact sheet, canvas, save.
 
-**Phase 2: edit.** Sources, paste and drop, use as source, before/after, klein and Qwen-Image-Edit, recipes.
+**Phase 2: edit.** Sources, paste and drop, use as source, before/after, FLUX.3 klein (built), recipes.
 
 **Phase 3: tools and polish.** Upscale, remove background, inpaint mask, compare models, command palette, Linux AMD/Intel.
 

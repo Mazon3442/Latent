@@ -40,6 +40,10 @@ pub struct Variant {
     /// "model": each part moves to the GPU only while it runs.
     #[serde(skip)]
     pub offload: &'static str,
+    /// How the transformer's weights are stored in memory: "bf16", or "fp8" (half the memory; it still computes in
+    /// bf16, one layer at a time).
+    #[serde(skip)]
+    pub weights: &'static str,
 }
 
 #[derive(Serialize, Clone, Copy)]
@@ -84,8 +88,8 @@ pub const CATALOG: &[Model] = &[Model {
     // with the text encoder on the CPU (about 4 s per new prompt, then cached) a frame takes about 13 s and nothing
     // moves between frames. Full offloading needs less VRAM but holds 20 GB in RAM and swaps it every frame.
     variants: &[
-        Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 14.2, ram: 10.0, disk: 32.9, offload: "text" },
-        Variant { id: "bf16-offload", label: "BF16, offloaded", vram: 12.3, ram: 22.0, disk: 32.9, offload: "model" },
+        Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 14.2, ram: 10.0, disk: 32.9, offload: "text", weights: "bf16" },
+        Variant { id: "bf16-offload", label: "BF16, offloaded", vram: 12.3, ram: 22.0, disk: 32.9, offload: "model", weights: "bf16" },
     ],
     repo: "Tongyi-MAI/Z-Image-Turbo",
     folder: "Z-Image-Turbo",
@@ -101,15 +105,76 @@ pub const CATALOG: &[Model] = &[Model {
     sizes: &[("1:1", 1024, 1024), ("4:5", 896, 1120), ("3:2", 1248, 832), ("2:3", 832, 1248), ("16:9", 1344, 768), ("9:16", 768, 1344)],
     grid: 16,
     options: Options { steps: Range { min: 8.0, max: 32.0, default: 16.0 }, guidance: None },
-    // Estimates until measured: a 5.6B transformer (11.1 GB in bf16) and an 8.9 GB Qwen3-VL text encoder.
+    // Measured on an RTX 5070 Ti at 1024 x 1024, 16 steps, text encoder on the CPU: 12.9 GB peak, about 17 s per new
+    // image (0.8 s per step) and 33 s per edit with one reference (the reference doubles the tokens). The offloaded
+    // variant is an estimate, not yet measured.
     variants: &[
-        Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 14.0, ram: 11.0, disk: 20.4, offload: "text" },
-        Variant { id: "bf16-offload", label: "BF16, offloaded", vram: 12.0, ram: 22.0, disk: 20.4, offload: "model" },
+        Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 12.9, ram: 11.0, disk: 20.4, offload: "text", weights: "bf16" },
+        Variant { id: "bf16-offload", label: "BF16, offloaded", vram: 11.0, ram: 22.0, disk: 20.4, offload: "model", weights: "bf16" },
     ],
     repo: "black-forest-labs/flux-3-image-klein",
     folder: "FLUX.3-klein",
     // The repo also holds single-file copies and FP8/NVFP4 variants for other tools; Latent loads the diffusers folders.
     skip_files: &["assets/*", "variants/*", "*.jpg", "model.safetensors", "ae.safetensors", "config.json", "manifest.json"],
+}, Model {
+    id: "qwen-image-2.1-turbo",
+    name: "Qwen-Image 2.1 Turbo",
+    family: "qwenimage21",
+    license: "Qwen research license (non-commercial)",
+    license_url: "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo",
+    commercial: false,
+    can: Can { generate: true, edit: true, inpaint: false, multi_ref: false, negative: false },
+    // The pipeline's default output is 1024 px; these are the model card's 2K presets at half size (a quarter of the
+    // pixels, so about four times faster).
+    sizes: &[("1:1", 1024, 1024), ("4:3", 1200, 896), ("3:4", 896, 1200), ("3:2", 1264, 848), ("2:3", 848, 1264), ("16:9", 1376, 768), ("9:16", 768, 1376)],
+    grid: 16,
+    // The checkpoint carries its own 8-step schedule; the step count can't be changed.
+    options: Options { steps: Range { min: 8.0, max: 8.0, default: 8.0 }, guidance: None },
+    // Measured on an RTX 5070 Ti at 1024 x 1024: the 7B transformer stored as FP8 (7.3 GB loaded), the 17.5 GB text
+    // encoder on the CPU, VAE tiled. About 17-24 s per new image (7.9 GB peak) and 39 s per edit (10.5 GB peak; the
+    // text encoder reads the reference too). Untiled, an edit peaked at 15.9 GB.
+    variants: &[Variant { id: "fp8-text-cpu", label: "FP8 weights, text encoder on the CPU", vram: 10.5, ram: 20.0, disk: 32.9, offload: "text", weights: "fp8" }],
+    repo: "Qwen/Qwen-Image-2.1-Turbo",
+    folder: "Qwen-Image-2.1-Turbo",
+    skip_files: &["assets/*", "*.jpg", "*.png", "*.webp", "*.gif"],
+}, Model {
+    id: "flux2-klein-4b",
+    name: "FLUX.2 klein 4B",
+    family: "flux2klein",
+    license: "Apache 2.0",
+    license_url: "https://huggingface.co/black-forest-labs/FLUX.2-klein-4B",
+    commercial: true,
+    can: Can { generate: true, edit: true, inpaint: false, multi_ref: true, negative: false },
+    sizes: &[("1:1", 1024, 1024), ("4:5", 896, 1120), ("3:2", 1248, 832), ("2:3", 832, 1248), ("16:9", 1344, 768), ("9:16", 768, 1344)],
+    grid: 16,
+    // Step-distilled: the model card runs it in 4 steps at guidance 1.
+    options: Options { steps: Range { min: 2.0, max: 8.0, default: 4.0 }, guidance: None },
+    // Measured on an RTX 5070 Ti at 1024 x 1024, 4 steps, text encoder on the CPU: BF16 9.8 GB peak, about 12 s per
+    // new image and 11 s per edit; FP8 6.2 GB peak at the same speed, the variant 8 GB cards get.
+    variants: &[
+        Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 9.8, ram: 10.0, disk: 15.9, offload: "text", weights: "bf16" },
+        Variant { id: "fp8-text-cpu", label: "FP8 weights, text encoder on the CPU", vram: 6.2, ram: 10.0, disk: 15.9, offload: "text", weights: "fp8" },
+    ],
+    repo: "black-forest-labs/FLUX.2-klein-4B",
+    folder: "FLUX.2-klein-4B",
+    skip_files: &["flux-2-klein-4b.safetensors", "assets/*", "*.jpg", "*.png"],
+}, Model {
+    id: "sana-sprint-1.6b",
+    name: "SANA-Sprint 1.6B",
+    family: "sanasprint",
+    license: "Apache 2.0, Gemma terms for its text encoder",
+    license_url: "https://huggingface.co/Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+    commercial: true,
+    can: Can { generate: true, edit: false, inpaint: false, multi_ref: false, negative: false },
+    // Its autoencoder works in 32 px blocks.
+    sizes: &[("1:1", 1024, 1024), ("4:5", 896, 1120), ("3:2", 1248, 832), ("2:3", 832, 1248), ("16:9", 1344, 768), ("9:16", 768, 1344)],
+    grid: 32,
+    options: Options { steps: Range { min: 1.0, max: 4.0, default: 2.0 }, guidance: None },
+    // Measured on an RTX 5070 Ti at 1024 x 1024, 2 steps, text encoder on the CPU: 5.3 GB peak, about 7 s per image.
+    variants: &[Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 5.3, ram: 7.0, disk: 9.6, offload: "text", weights: "bf16" }],
+    repo: "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+    folder: "SANA-Sprint-1.6B",
+    skip_files: &["assets/*", "*.jpg", "*.png", "*.gif"],
 }];
 
 pub fn find(id: &str) -> Result<&'static Model, String> {

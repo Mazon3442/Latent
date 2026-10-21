@@ -244,15 +244,20 @@ function renderControls() {
   if (!m) { $("#controlsBody").innerHTML = `<p class="ctl-none">Pick a model first.</p>`; return; }
   const r = m.options.steps;
   const steps = state.steps ?? r.default;
-  const pct = ((steps - r.min) / (r.max - r.min)) * 100;
-  $("#controlsBody").innerHTML = `
+  const pct = r.max > r.min ? ((steps - r.min) / (r.max - r.min)) * 100 : 100;
+  const fixed = r.min === r.max;
+  $("#controlsBody").innerHTML = (fixed ? `
+    <div class="ctl">
+      <div class="ctl-top"><b>Steps</b><span class="ctl-val def">${r.default}</span></div>
+      <p>${esc(m.name)} runs its own ${r.default}-step schedule, so the step count can't be changed.</p>
+    </div>` : `
     <div class="ctl">
       <div class="ctl-top"><b id="ctl-steps">Steps</b>
         ${state.steps !== null ? `<button class="ctl-reset" data-reset="steps" title="Back to ${r.default}">Reset</button>` : ""}
         <span class="ctl-val ${state.steps === null ? "def" : ""}">${steps}</span></div>
       <input class="slider" type="range" id="steps" min="${r.min}" max="${r.max}" step="1" value="${steps}" aria-labelledby="ctl-steps" style="--pct:${pct}%">
       <p>Passes that refine the image. ${m.name} is tuned for ${r.default}; more is slower and rarely better.</p>
-    </div>
+    </div>`) + `
     <div class="ctl">
       <div class="ctl-top"><b id="ctl-seed">Seed</b>
         ${state.seed !== "" ? `<button class="ctl-reset" data-reset="seed" title="Back to random">Random</button>` : ""}

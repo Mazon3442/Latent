@@ -25,7 +25,7 @@
 | Feature | What it does |
 | --- | --- |
 | **Watch it develop** | Each frame appears in its tile as it's made, a step at a time, so a bad seed shows in the first seconds and you can cancel it. The model stays loaded. |
-| **Edit any photo** | Drop, paste or import a picture and describe the change. The canvas shows the result next to the original. |
+| **Edit any photo** | Drop, paste or import a picture and describe the change, or pick several and combine them. FLUX.3 klein keeps what you didn't ask to change. |
 | **Use as source** | Any frame becomes the input for the next edit with one key (E). Make, pick, refine, without downloading and uploading. |
 | **The right size for each model** | Choose an aspect ratio, not pixel counts. Latent picks the model's native resolution, so results don't come out stretched or cropped. |
 | **Models that fit your PC** | Latent reads your GPU and memory and offers each model in a variant that fits, quantized or offloaded when needed. The bar at the top shows real VRAM use, and hovering a model shows its footprint before you load it. |
@@ -36,16 +36,17 @@
 
 ## Models
 
-| Model | Does | Memory | License |
-| --- | --- | --- | --- |
-| **Z-Image Turbo** | generate, in 9 steps, about 13 s per 1024 × 1024 frame | 14.2 GB VRAM peak · 10 GB RAM | Apache 2.0 |
-| **FLUX.2 [klein] 4B** | generate and edit, several reference images | 10–13 GB VRAM¹ | Apache 2.0 |
-| **Qwen-Image-Edit** | edit, strong on text and objects | 16 GB VRAM, quantized¹ | Apache 2.0 |
-| **SDXL 1.0** | generate, inpaint; runs on smaller GPUs | about 8 GB VRAM¹ | CreativeML OpenRAIL++-M |
-| **Real-ESRGAN** | upscale | under 1 GB | BSD-3-Clause |
-| **BiRefNet** | remove background | about 2 GB | MIT |
+| Model | Does | Memory and speed | License | In Latent |
+| --- | --- | --- | --- | --- |
+| **Z-Image Turbo** | generate, 9 steps | 14.2 GB VRAM peak · about 13 s per 1024 × 1024 frame | Apache 2.0 | yes |
+| **FLUX.3 klein** | generate, and edit with up to 10 reference photos, 16 steps | 12.9 GB VRAM peak · about 17 s per image, 33 s per edit | FLUX Kommunity License (commercial use free under US$5M revenue) | yes, needs a free Hugging Face account |
+| **Qwen-Image 2.1 Turbo** | generate and edit, strong on text and layouts, 8 steps | 10.5 GB VRAM peak · about 20 s per image, 39 s per edit · 20 GB RAM | Qwen research license (**non-commercial**) | yes |
+| **FLUX.2 klein 4B** | generate and edit, 4 steps | 9.8 GB VRAM peak (6.2 GB as FP8 on 8 GB cards) · about 12 s per image or edit | Apache 2.0 | yes |
+| **SANA-Sprint 1.6B** | generate, 2 steps | 5.3 GB VRAM peak · about 7 s per image | Apache 2.0, Gemma terms for its text encoder | yes |
+| **Real-ESRGAN** | upscale | under 1 GB¹ | BSD-3-Clause | planned |
+| **BiRefNet** | remove background | about 2 GB¹ | MIT | planned |
 
-<sub>Z-Image Turbo was measured with Latent on an RTX 5070 Ti (16 GB); on smaller GPUs Latent offloads it (12.3 GB VRAM, slower). ¹ Published or estimated figures, not yet measured with Latent. They will be replaced with measurements from an RTX 5070 Ti and a 16-thread CPU before the first release. No model weights are included in Latent; each is downloaded on request and keeps its own license, which applies to what you make with it.</sub>
+<sub>Measured with Latent on an RTX 5070 Ti (16 GB), with each model's text encoder on the CPU; on smaller GPUs Latent offloads the model instead, which needs less VRAM and runs slower. ¹ Published figures, not yet measured with Latent. No model weights are included in Latent; each is downloaded on request and keeps its own license, which applies to what you make with it.</sub>
 
 ## How it works
 
