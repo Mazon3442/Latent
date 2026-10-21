@@ -63,6 +63,8 @@ pub struct Model {
     pub grid: u32,
     pub options: Options,
     pub variants: &'static [Variant],
+    /// The repo is gated: downloading needs a free Hugging Face account that accepted the license, and its token.
+    pub account: bool,
     #[serde(skip)]
     pub repo: &'static str,
     /// Folder under <models folder>/models.
@@ -91,6 +93,7 @@ pub const CATALOG: &[Model] = &[Model {
         Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 14.2, ram: 10.0, disk: 32.9, offload: "text", weights: "bf16" },
         Variant { id: "bf16-offload", label: "BF16, offloaded", vram: 12.3, ram: 22.0, disk: 32.9, offload: "model", weights: "bf16" },
     ],
+    account: false,
     repo: "Tongyi-MAI/Z-Image-Turbo",
     folder: "Z-Image-Turbo",
     skip_files: &["assets/*", "*.pdf"],
@@ -112,6 +115,7 @@ pub const CATALOG: &[Model] = &[Model {
         Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 12.9, ram: 11.0, disk: 20.4, offload: "text", weights: "bf16" },
         Variant { id: "bf16-offload", label: "BF16, offloaded", vram: 11.0, ram: 22.0, disk: 20.4, offload: "model", weights: "bf16" },
     ],
+    account: true,
     repo: "black-forest-labs/flux-3-image-klein",
     folder: "FLUX.3-klein",
     // The repo also holds single-file copies and FP8/NVFP4 variants for other tools; Latent loads the diffusers folders.
@@ -134,6 +138,7 @@ pub const CATALOG: &[Model] = &[Model {
     // encoder on the CPU, VAE tiled. About 17-24 s per new image (7.9 GB peak) and 39 s per edit (10.5 GB peak; the
     // text encoder reads the reference too). Untiled, an edit peaked at 15.9 GB.
     variants: &[Variant { id: "fp8-text-cpu", label: "FP8 weights, text encoder on the CPU", vram: 10.5, ram: 20.0, disk: 32.9, offload: "text", weights: "fp8" }],
+    account: false,
     repo: "Qwen/Qwen-Image-2.1-Turbo",
     folder: "Qwen-Image-2.1-Turbo",
     skip_files: &["assets/*", "*.jpg", "*.png", "*.webp", "*.gif"],
@@ -155,6 +160,7 @@ pub const CATALOG: &[Model] = &[Model {
         Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 9.8, ram: 10.0, disk: 15.9, offload: "text", weights: "bf16" },
         Variant { id: "fp8-text-cpu", label: "FP8 weights, text encoder on the CPU", vram: 6.2, ram: 10.0, disk: 15.9, offload: "text", weights: "fp8" },
     ],
+    account: false,
     repo: "black-forest-labs/FLUX.2-klein-4B",
     folder: "FLUX.2-klein-4B",
     skip_files: &["flux-2-klein-4b.safetensors", "assets/*", "*.jpg", "*.png"],
@@ -172,6 +178,7 @@ pub const CATALOG: &[Model] = &[Model {
     options: Options { steps: Range { min: 1.0, max: 4.0, default: 2.0 }, guidance: None },
     // Measured on an RTX 5070 Ti at 1024 x 1024, 2 steps, text encoder on the CPU: 5.3 GB peak, about 7 s per image.
     variants: &[Variant { id: "bf16-text-cpu", label: "BF16, text encoder on the CPU", vram: 5.3, ram: 7.0, disk: 9.6, offload: "text", weights: "bf16" }],
+    account: false,
     repo: "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
     folder: "SANA-Sprint-1.6B",
     skip_files: &["assets/*", "*.jpg", "*.png", "*.gif"],
@@ -188,10 +195,15 @@ pub fn fits(v: &Variant, on_gpu: bool, vram_total: f64, ram_total: f64) -> &'sta
 }
 
 impl Model {
-    /// The variant asked for, or else the fastest one that fits this PC (variants are listed fastest first).
-    pub fn variant(&self, id: Option<&str>, on_gpu: bool, vram_total: f64, ram_total: f64) -> &'static Variant {
+    /// The variant asked for, or else the fastest one that fits this PC (variants are listed fastest first). With
+    /// `lightest`, the one that needs the least memory instead, to leave room for other apps.
+    pub fn variant(&self, id: Option<&str>, on_gpu: bool, vram_total: f64, ram_total: f64, lightest: bool) -> &'static Variant {
         if let Some(v) = id.and_then(|id| self.variants.iter().find(|v| v.id == id)) {
             return v;
+        }
+        if lightest {
+            let need = |v: &&Variant| if on_gpu { v.vram } else { v.ram };
+            return self.variants.iter().min_by(|a, b| need(a).total_cmp(&need(b))).unwrap_or(&self.variants[0]);
         }
         ["yes", "tight"]
             .iter()
@@ -207,8 +219,11 @@ mod tests {
     #[test]
     fn picks_the_fastest_variant_that_fits() {
         let z = find("z-image-turbo").unwrap();
-        assert_eq!(z.variant(None, true, 15.9, 31.0).id, "bf16-text-cpu", "16 GB card keeps the transformer resident");
-        assert_eq!(z.variant(None, true, 13.5, 31.0).id, "bf16-offload", "a 14 GB card falls back to offloading");
-        assert_eq!(z.variant(Some("bf16-offload"), true, 15.9, 31.0).id, "bf16-offload", "an explicit choice wins");
+        assert_eq!(z.variant(None, true, 15.9, 31.0, false).id, "bf16-text-cpu", "16 GB card keeps the transformer resident");
+        assert_eq!(z.variant(None, true, 13.5, 31.0, false).id, "bf16-offload", "a 14 GB card falls back to offloading");
+        assert_eq!(z.variant(Some("bf16-offload"), true, 15.9, 31.0, false).id, "bf16-offload", "an explicit choice wins");
+        let k = find("flux2-klein-4b").unwrap();
+        assert_eq!(k.variant(None, true, 15.9, 31.0, false).id, "bf16-text-cpu", "full quality when it fits");
+        assert_eq!(k.variant(None, true, 15.9, 31.0, true).id, "fp8-text-cpu", "Prefer less VRAM takes the lightest");
     }
 }

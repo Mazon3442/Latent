@@ -92,7 +92,7 @@ fn run(mut cmd: Command, log: &Path) -> Result<(), String> {
     Err(format!("failed ({status}): {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | ")))
 }
 
-fn folder_bytes(dir: &Path) -> u64 {
+pub fn folder_bytes(dir: &Path) -> u64 {
     std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| match e.file_type() {
         Ok(t) if t.is_dir() => folder_bytes(&e.path()),
         _ => e.metadata().map(|m| m.len()).unwrap_or(0),
@@ -157,7 +157,14 @@ pub fn install(app: Option<&AppHandle>, home: &Path, logs: &Path, m: &Model, dev
     }
     let fetched = run(c, &log);
     finished.store(true, Ordering::SeqCst);
-    fetched.map_err(|e| format!("Downloading the model: {e}"))?;
+    fetched.map_err(|e| {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("GatedRepoError") || text.contains("401 Client Error") || text.contains("403 Client Error") {
+            format!("{} needs a free Hugging Face account that has accepted its license. Settings \u{203a} Hugging Face token explains how.", m.name)
+        } else {
+            format!("Downloading the model: {e}")
+        }
+    })?;
 
     std::fs::write(marker(home, m), device).map_err(|e| e.to_string())?;
     emit("done", "Installed", Some(total_bytes));

@@ -25,6 +25,7 @@
       </div>
     </div>
     <div class="top-actions">
+      <button class="update-pill" id="updateBtn" hidden></button>
       <button class="quiet" id="settingsBtn" title="Settings (Ctrl ,)">
         <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 4h7M13 4h1M2 8h2M8 8h6M2 12h8M14 12h0"/><circle cx="11" cy="4" r="1.8"/><circle cx="6" cy="8" r="1.8"/><circle cx="12" cy="12" r="1.8"/></svg>
         Settings
@@ -104,6 +105,26 @@
       <button class="btn icon" data-close aria-label="Close" title="Close (Esc)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
     </div>
     <div class="dlg-body" id="settingsBody"></div>
+  </div>
+</div>
+
+<div class="overlay" id="updateDlg">
+  <div class="dialog update" role="dialog" aria-modal="true" aria-labelledby="upTitle">
+    <h3 id="upTitle"></h3>
+    <p class="meta" id="upCurrent"></p>
+    <div class="up-notes" id="upNotes"></div>
+    <p class="up-warn" id="upWarn" hidden></p>
+    <div class="progress up-progress" hidden><span id="upBar"></span></div>
+    <div class="row up-foot"><span class="meta grow" id="upStatus"></span><button class="btn" id="upLater">Later</button><button class="btn live" id="upInstall">Install and restart</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="helpDlg">
+  <div class="dialog help" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <div class="dlg-head"><h3 id="helpTitle"></h3>
+      <button class="btn icon" data-close aria-label="Close" title="Close (Esc)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="dlg-body help-body" id="helpBody"></div>
   </div>
 </div>
 

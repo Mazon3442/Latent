@@ -19,6 +19,7 @@ use std::time::Duration;
 use store::Settings;
 use tauri::{AppHandle, Emitter, Manager as _, RunEvent, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_updater::UpdaterExt;
 
 struct Dirs {
     resources: PathBuf,
@@ -58,7 +59,8 @@ impl App {
     /// The variant of `m` to run: the one asked for, or the fastest that fits this PC.
     fn variant(&self, m: &models::Model, id: Option<&str>) -> &'static models::Variant {
         let hw = self.hw.lock().unwrap().clone();
-        m.variant(id, self.device() != "cpu", hw.vram_total, hw.ram_total)
+        let lightest = self.settings.lock().unwrap().low_vram;
+        m.variant(id, self.device() != "cpu", hw.vram_total, hw.ram_total, lightest)
     }
 
     /// The catalog with what this PC has: installed or not, whether each variant fits, and which one runs.
@@ -242,14 +244,32 @@ fn delete_source(app: State<'_, Shared>, id: String) -> Result<(), String> {
     app.library.delete_source(&id)
 }
 
-fn unique(dir: &Path, stem: &str) -> PathBuf {
-    let mut p = dir.join(format!("{stem}.png"));
+fn unique(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    let mut p = dir.join(format!("{stem}.{ext}"));
     let mut n = 2;
     while p.exists() {
-        p = dir.join(format!("{stem} ({n}).png"));
+        p = dir.join(format!("{stem} ({n}).{ext}"));
         n += 1;
     }
     p
+}
+
+/// PNG is copied as it is, so the recipe and the AI-generated mark in it are kept. JPEG is re-encoded: smaller, but it
+/// has no place for them.
+fn export(src: &str, dst: &Path) -> Result<(), String> {
+    let jpeg = dst.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
+    if !jpeg {
+        return std::fs::copy(src, dst).map(|_| ()).map_err(|e| format!("can't save to {}: {e}", dst.display()));
+    }
+    let image = image::open(src).map_err(|e| e.to_string())?.to_rgb8();
+    let file = std::fs::File::create(dst).map_err(|e| format!("can't save to {}: {e}", dst.display()))?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 92)
+        .encode_image(&image)
+        .map_err(|e| format!("can't save to {}: {e}", dst.display()))
+}
+
+fn save_ext(app: &App) -> &'static str {
+    if app.settings.lock().unwrap().format == "JPEG" { "jpg" } else { "png" }
 }
 
 /// A file name from the first words of the prompt and the seed: "lighthouse-at-dusk-41.png".
@@ -263,7 +283,6 @@ fn file_stem(prompt: &str, seed: i64) -> String {
     if words.is_empty() { format!("latent-{seed}") } else { format!("{}-{seed}", words.join("-")) }
 }
 
-/// Saving copies the PNG as it is, so the recipe and the AI-generated mark in it are kept.
 #[tauri::command]
 async fn save_frame(app: State<'_, Shared>, id: String) -> Result<String, String> {
     let app = app.inner().clone();
@@ -271,8 +290,8 @@ async fn save_frame(app: State<'_, Shared>, id: String) -> Result<String, String
         let f = app.library.frame(&id)?;
         let dir = PathBuf::from(&app.settings.lock().unwrap().save_dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
-        let dst = unique(&dir, &file_stem(f.recipe["prompt"].as_str().unwrap_or_default(), f.seed));
-        std::fs::copy(&f.path, &dst).map_err(|e| format!("can't save to {}: {e}", dst.display()))?;
+        let dst = unique(&dir, &file_stem(f.recipe["prompt"].as_str().unwrap_or_default(), f.seed), save_ext(&app));
+        export(&f.path, &dst)?;
         let dst = dst.to_string_lossy().to_string();
         app.library.mark_saved(&id, &dst);
         Ok(dst)
@@ -285,16 +304,19 @@ async fn save_frame_as(handle: AppHandle, app: State<'_, Shared>, id: String) ->
     let app = app.inner().clone();
     blocking(move || {
         let f = app.library.frame(&id)?;
-        let picked = handle
+        let ext = save_ext(&app);
+        let mut dialog = handle
             .dialog()
             .file()
             .set_title("Save frame as")
-            .set_file_name(format!("{}.png", file_stem(f.recipe["prompt"].as_str().unwrap_or_default(), f.seed)))
-            .add_filter("PNG", &["png"])
-            .blocking_save_file();
-        let Some(picked) = picked else { return Ok(None) };
+            .set_file_name(format!("{}.{ext}", file_stem(f.recipe["prompt"].as_str().unwrap_or_default(), f.seed)));
+        // The format from Settings comes first; the other is one click away.
+        for (name, e) in if ext == "jpg" { [("JPEG", "jpg"), ("PNG", "png")] } else { [("PNG", "png"), ("JPEG", "jpg")] } {
+            dialog = dialog.add_filter(name, &[e]);
+        }
+        let Some(picked) = dialog.blocking_save_file() else { return Ok(None) };
         let dst = picked.into_path().map_err(|e| e.to_string())?;
-        std::fs::copy(&f.path, &dst).map_err(|e| format!("can't save to {}: {e}", dst.display()))?;
+        export(&f.path, &dst)?;
         let dst = dst.to_string_lossy().to_string();
         app.library.mark_saved(&id, &dst);
         Ok(Some(dst))
@@ -327,6 +349,73 @@ fn reveal(path: String) {
     }
 }
 
+/// Open a help link in the browser. Only Hugging Face and GitHub pages: the interface can't send the user anywhere else.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !allowed_url(&url) {
+        return Err("Latent only opens Hugging Face and GitHub pages.".into());
+    }
+    #[cfg(windows)]
+    let opened = std::process::Command::new("explorer").arg(&url).spawn();
+    #[cfg(unix)]
+    let opened = std::process::Command::new("xdg-open").arg(&url).spawn();
+    opened.map(|_| ()).map_err(|e| format!("couldn't open the browser: {e}"))
+}
+
+fn allowed_url(url: &str) -> bool {
+    let allowed = ["https://huggingface.co/", "https://github.com/", "https://docs.astral.sh/"];
+    allowed.iter().any(|p| url.starts_with(p)) && !url.contains(|c: char| c.is_whitespace() || c == '"' || c.is_control())
+}
+
+/// Disk used by the models folder: the Python environment and every downloaded model.
+#[tauri::command]
+async fn models_disk(app: State<'_, Shared>) -> Result<u64, String> {
+    let home = PathBuf::from(&app.settings.lock().unwrap().models_dir);
+    blocking(move || Ok(install::folder_bytes(&home))).await
+}
+
+/// Ask Hugging Face who a token belongs to, and whether it can download each model that needs an account. Runs in
+/// Latent's Python environment; the token goes in the environment, not on a command line other programs can read.
+#[tauri::command]
+async fn test_hf_token(app: State<'_, Shared>, token: String) -> Result<Value, String> {
+    let home = PathBuf::from(&app.settings.lock().unwrap().models_dir);
+    blocking(move || {
+        let py = install::python(&home);
+        if !py.is_file() {
+            return Err("The check runs in Latent's Python environment, which arrives with the first model. Download any model first.".into());
+        }
+        let repos: Vec<(&str, &str)> = models::CATALOG.iter().filter(|m| m.account).map(|m| (m.id, m.repo)).collect();
+        let script = r#"
+import json, os, sys
+from huggingface_hub import HfApi
+api = HfApi(token=os.environ["HF_TOKEN"])
+try:
+    name = api.whoami()["name"]
+except Exception as e:
+    print(json.dumps({"error": "Hugging Face didn't accept this token. Check it was copied whole, and that it hasn't been deleted."})); sys.exit()
+access = {}
+for model_id, repo in json.loads(sys.argv[1]):
+    try:
+        api.auth_check(repo); access[model_id] = True
+    except Exception:
+        access[model_id] = False
+print(json.dumps({"name": name, "access": access}))
+"#;
+        let mut cmd = std::process::Command::new(&py);
+        cmd.arg("-c").arg(script).arg(serde_json::to_string(&repos).unwrap_or_default()).env("HF_TOKEN", token.trim());
+        worker::hidden(&mut cmd);
+        let out = cmd.output().map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let v: Value = text.lines().rev().find_map(|l| serde_json::from_str(l).ok())
+            .ok_or_else(|| "Couldn't reach Hugging Face. Check the internet connection and try again.".to_string())?;
+        if let Some(e) = v["error"].as_str() {
+            return Err(e.to_string());
+        }
+        Ok(v)
+    })
+    .await
+}
+
 #[tauri::command]
 fn ui_error(app: State<'_, Shared>, message: String) {
     use std::io::Write;
@@ -334,6 +423,45 @@ fn ui_error(app: State<'_, Shared>, message: String) {
         let _ = writeln!(f, "{} {message}", library::now_ms());
     }
 }
+
+// ---------------------------------------------------------------- updates
+
+/// The newest GitHub release, if it's newer than this build. Development builds never offer one.
+#[tauri::command]
+async fn check_update(handle: AppHandle) -> Result<Option<Value>, String> {
+    if cfg!(debug_assertions) {
+        return Ok(None);
+    }
+    let update = handle.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| format!("Couldn't check for updates: {e}"))?;
+    Ok(update.map(|u| json!({ "version": u.version, "current": u.current_version, "notes": u.body.clone().unwrap_or_default() })))
+}
+
+/// Download the newest release, install it and restart into it. Progress arrives as "update-progress" events.
+#[tauri::command]
+async fn install_update(handle: AppHandle) -> Result<(), String> {
+    let update = handle
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| format!("Couldn't check for updates: {e}"))?
+        .ok_or("Latent is already up to date.")?;
+    let h = handle.clone();
+    let mut done = 0u64;
+    update
+        .download_and_install(
+            move |chunk, total| {
+                done += chunk as u64;
+                let _ = h.emit("update-progress", json!({ "done": done, "total": total }));
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| format!("Couldn't install the update: {e}"))?;
+    handle.restart()
+}
+
+// ---------------------------------------------------------------- setup
 
 fn resources_dir(handle: &AppHandle) -> PathBuf {
     let bundled = handle.path().resource_dir().unwrap_or_default();
@@ -386,6 +514,7 @@ fn main() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|tauri_app| {
             let handle = tauri_app.handle().clone();
             let data = handle.path().app_data_dir()?;
@@ -425,7 +554,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             bootstrap, save_settings, install_model, remove_model, preload, unload, generate, cancel,
             import_sources, paste_source, frame_to_source, delete_source, save_frame, save_frame_as, delete_frame,
-            pick_folder, reveal, ui_error
+            pick_folder, reveal, ui_error, check_update, install_update, open_url, models_disk, test_hf_token
         ])
         .build(tauri::generate_context!())
         .expect("error while building Latent")
@@ -442,6 +571,32 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_help_pages_open() {
+        assert!(allowed_url("https://huggingface.co/settings/tokens"));
+        assert!(allowed_url("https://github.com/Mazon3442/Latent/releases"));
+        assert!(!allowed_url("https://huggingface.co.evil.example/"), "a look-alike host");
+        assert!(!allowed_url("http://huggingface.co/"), "plain http");
+        assert!(!allowed_url("file:///C:/Windows/System32/calc.exe"));
+        assert!(!allowed_url("https://github.com/x \"--some-flag\""), "no extra arguments");
+    }
+
+    #[test]
+    fn jpeg_export_reencodes_and_png_copies() {
+        let dir = std::env::temp_dir().join(format!("latent-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("frame.png");
+        image::RgbImage::from_pixel(32, 16, image::Rgb([200, 120, 40])).save(&src).unwrap();
+        let src = src.to_string_lossy().to_string();
+        export(&src, &dir.join("a.jpg")).unwrap();
+        let jpg = image::open(dir.join("a.jpg")).unwrap();
+        assert_eq!((jpg.width(), jpg.height()), (32, 16));
+        assert_eq!(std::fs::read(dir.join("a.jpg")).unwrap()[..2], [0xFF, 0xD8], "a real JPEG");
+        export(&src, &dir.join("b.png")).unwrap();
+        assert_eq!(std::fs::read(dir.join("b.png")).unwrap(), std::fs::read(&src).unwrap(), "PNG is copied byte for byte");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn file_names_come_from_the_prompt() {

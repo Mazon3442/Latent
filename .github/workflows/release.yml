@@ -1,0 +1,163 @@
+# Push an annotated version tag to build Windows and Linux packages and publish one GitHub release.
+# The release notes are the tag's message, exactly as written:
+#   git tag -a v1.0.0 -F notes.md      (or lazygit: Commits panel, T, then a tag description)
+#   git push origin v1.0.0
+# Git deletes lines starting with "#" from tag messages, which kills Markdown headings. This repo sets
+# `git config core.commentChar ";"` so headings survive; on a fresh clone run that once (or tag with --cleanup=verbatim).
+# In-app updates: packages are signed with the TAURI_SIGNING_PRIVATE_KEY repository secret (the private half of the
+# pubkey in tauri.conf.json), and the release carries latest.json, which installed copies of Latent check on start.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write # create the release and upload the packages
+
+# Hosted runners sometimes drop crate downloads ("[55] Failed sending data to the peer ... Connection was reset").
+# Retry harder and use plain HTTP/1.1 connections, which reset far less often than multiplexed HTTP/2 ones.
+env:
+  CARGO_NET_RETRY: 10
+  CARGO_HTTP_MULTIPLEXING: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # v1.2.3 -> 1.2.3, so the installer and the app carry the tag's version.
+      - name: Read version from tag
+        id: version
+        shell: bash
+        run: echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build installer
+        shell: bash
+        run: npx --yes @tauri-apps/cli@2 build --config "{\"version\":\"${{ steps.version.outputs.number }}\",\"bundle\":{\"createUpdaterArtifacts\":true}}"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            app/src-tauri/target/release/bundle/nsis/*.exe
+            app/src-tauri/target/release/bundle/nsis/*.exe.sig
+          if-no-files-found: error
+
+  # .deb, .rpm and AppImage.
+  linux:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: app/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Read version from tag
+        id: version
+        run: echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build packages
+        run: npx --yes @tauri-apps/cli@2 build --bundles deb,rpm,appimage --config "{\"version\":\"${{ steps.version.outputs.number }}\",\"bundle\":{\"createUpdaterArtifacts\":true}}"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            app/src-tauri/target/release/bundle/deb/*.deb*
+            app/src-tauri/target/release/bundle/rpm/*.rpm*
+            app/src-tauri/target/release/bundle/appimage/*.AppImage*
+          if-no-files-found: error
+
+  # One job publishes the release once both builds succeed, so the two never race to create it.
+  release:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # actions/checkout turns annotated tags into lightweight ones, so fetch the real tag object first.
+      - name: Read release notes from the tag message
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = "tag" ]; then
+            git for-each-ref --format='%(contents)' "refs/tags/${GITHUB_REF_NAME}" > notes.md
+          else
+            echo "::warning::${GITHUB_REF_NAME} is not an annotated tag, so the release has no notes. Use: git tag -a ${GITHUB_REF_NAME} --cleanup=verbatim -F notes.md"
+            : > notes.md
+          fi
+          cat notes.md
+
+      # The Linux artifact keeps its deb/, rpm/ and appimage/ folders, so packages are matched at any depth below.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # latest.json tells installed copies of Latent which package to download for how they were installed.
+      - name: Write the updater manifest
+        run: |
+          python3 - <<'PY'
+          import datetime, glob, json, os
+          tag = os.environ["GITHUB_REF_NAME"]
+          base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{tag}/"
+          def entry(pattern):
+              found = [p for p in glob.glob(f"dist/**/{pattern}", recursive=True) if os.path.isfile(p + ".sig")]
+              return {"url": base + os.path.basename(found[0]), "signature": open(found[0] + ".sig").read().strip()} if found else None
+          platforms = {"windows-x86_64": entry("*.exe"), "linux-x86_64": entry("*.AppImage"),
+                       "linux-x86_64-deb": entry("*.deb"), "linux-x86_64-rpm": entry("*.rpm")}
+          manifest = {"version": tag.lstrip("v"), "notes": open("notes.md").read().strip(),
+                      "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "platforms": {k: v for k, v in platforms.items() if v}}
+          assert "windows-x86_64" in manifest["platforms"] and "linux-x86_64" in manifest["platforms"], "unsigned packages"
+          json.dump(manifest, open("dist/latest.json", "w"), indent=2)
+          print(json.dumps(manifest, indent=2))
+          PY
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Latent ${{ github.ref_name }}
+          body_path: notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }} # v1.0.0-beta.1 is marked as a pre-release
+          fail_on_unmatched_files: true
+          files: |
+            dist/**/*.exe
+            dist/**/*.deb
+            dist/**/*.rpm
+            dist/**/*.AppImage
+            dist/latest.json

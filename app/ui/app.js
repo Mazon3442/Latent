@@ -83,14 +83,34 @@ function engineState(id) {
   return state.engine[id] === "loading" ? "loading" : "cold";
 }
 
+/** Installed models that are pinned, in pin order. */
+const pinned = () => (state.settings.pinned || []).map(id => state.models.find(m => m.id === id && m.installed)).filter(Boolean);
+const isPinned = id => (state.settings.pinned || []).includes(id);
+
+/** The top bar: pinned models, or every installed one when none are pinned; the model in use always shows. */
+function topBarModels() {
+  const list = pinned().length ? pinned() : installed();
+  const current = model();
+  return current && !list.includes(current) ? [...list, current] : list;
+}
+
+function togglePin(id) {
+  const pins = (state.settings.pinned || []).filter(x => state.models.some(m => m.id === x && m.installed));
+  state.settings.pinned = pins.includes(id) ? pins.filter(x => x !== id) : [...pins, id];
+  saveSettings();
+  render();
+}
+
 function renderTop() {
-  const list = installed();
+  const list = topBarModels();
+  const hidden = installed().length - list.length;
   $("#modelBtns").innerHTML = list.map(m => {
     const s = engineState(m.id);
     const label = { warm: "loaded", busy: "developing", loading: "loading", cold: "not loaded" }[s];
     return `<button class="model-btn" data-id="${m.id}" aria-pressed="${m.id === state.model}">
       <b>${esc(m.name)}</b><span>${gb(variant(m).vram)} GB</span><span class="state" data-s="${s}">${label}</span></button>`;
-  }).join("") + `<button class="model-btn" id="modelsBtn">${list.length ? "Models…" : "Get a model…"}</button>`;
+  }).join("") + `<button class="model-btn" id="modelsBtn" title="${hidden ? `${hidden} more installed, not pinned` : "Download, remove and pin models"}">${
+       !installed().length ? "Get a model…" : hidden ? `Models… <span class="meta">+${hidden}</span>` : "Models…"}</button>`;
   renderMem();
 }
 
@@ -197,12 +217,20 @@ let menuFor = null;
 const COUNTS = [1, 2, 4, 8];
 function menuHtml(kind) {
   const m = model();
-  if (kind === "model") return `<p class="menu-title">Model</p>` + installed().map(x => {
-    const v = variant(x);
-    const does = x.can.edit ? "makes and edits images" : "makes new images";
-    return `<button class="mi" data-pick-model="${x.id}" aria-checked="${x.id === state.model}"><b>${esc(x.name)}<em>${{ warm: "loaded", busy: "developing", loading: "loading", cold: "not loaded" }[engineState(x.id)]}</em></b>
-      <span>${does} · about ${gb(v.vram)} GB · ${x.options.steps.default} steps</span></button>`;
-  }).join("") + `<div class="menu-sep"></div><button class="mi" data-open-models><b>More models…</b><span>Download or remove models</span></button>`;
+  if (kind === "model") {
+    const item = x => {
+      const v = variant(x);
+      const does = x.can.edit ? "makes and edits images" : "makes new images";
+      return `<button class="mi" data-pick-model="${x.id}" aria-checked="${x.id === state.model}"><b>${esc(x.name)}<em>${{ warm: "loaded", busy: "developing", loading: "loading", cold: "not loaded" }[engineState(x.id)]}</em></b>
+        <span>${does} · about ${gb(v.vram)} GB · ${x.options.steps.default} steps</span></button>`;
+    };
+    const pins = pinned();
+    const rest = installed().filter(x => !pins.includes(x));
+    return (pins.length
+      ? `<p class="menu-title">Pinned</p>${pins.map(item).join("")}${rest.length ? `<p class="menu-title">Not pinned</p>${rest.map(item).join("")}` : ""}`
+      : `<p class="menu-title">Model</p>${rest.map(item).join("")}`)
+      + `<div class="menu-sep"></div><button class="mi" data-open-models><b>More models…</b><span>Download, remove and pin models</span></button>`;
+  }
   if (kind === "aspect") return `<p class="menu-title">Shape</p>` + m.sizes.map(s =>
     `<button class="mi" data-aspect="${s.aspect}" aria-checked="${s.aspect === sizeFor(m).aspect}"><b>${s.aspect}<em>${s.width} × ${s.height}</em></b></button>`).join("");
   if (kind === "count") return `<p class="menu-title">Frames per batch</p>` + COUNTS.map(n =>
@@ -389,6 +417,12 @@ function installRow(m) {
   return `${failed}<div class="row"><button class="btn small" data-install="${m.id}">${failed ? "Try again" : "Download"}</button></div>`;
 }
 
+/** The catalog again from the core, after a setting that changes which variant runs. */
+async function refreshModels() {
+  await new Promise(r => setTimeout(r, 400)); // after the settings save lands
+  try { state.models = (await invoke("bootstrap")).models; render(); } catch {}
+}
+
 async function installModel(id) {
   state.installing[id] = { phase: "env", label: "Starting" };
   renderModels();
@@ -539,13 +573,15 @@ function renderStatus() {
 }
 
 // ---------- dialogs ----------
+// Dialogs stack (an explainer opens over Settings); the newest is moved last in the page, so it's on top and closes first.
 function openDialog(id) {
   closeMenu();
+  document.body.append($(id));
   $(id).classList.add("open");
-  $(id).querySelector("[data-close]").focus();
+  $(id).querySelector("[data-close]")?.focus();
 }
 function closeDialogs() {
-  const open = document.querySelector(".overlay.open");
+  const open = [...document.querySelectorAll(".overlay.open")].pop();
   open?.classList.remove("open");
   return !!open;
 }
@@ -556,40 +592,232 @@ function renderModels() {
       const v = variant(m);
       const fit = { yes: "Fits this PC", tight: "Fits, just", no: "Doesn't fit this PC" }[v.fits];
       const does = m.can.edit ? "Makes and edits images" : "Makes new images";
+      const account = m.account && !m.installed
+        ? `<div class="meta">Needs a free Hugging Face account and its token ${`<button class="info" data-help="hfToken" aria-label="About Hugging Face tokens" title="What's this?">i</button>`}${state.settings.hfToken ? "" : " · no token set yet"}</div>` : "";
       const action = m.installed
-        ? `<div class="row"><span class="meta">Installed.</span><span class="grow"></span><button class="quiet danger" data-remove="${m.id}">Remove</button></div>`
-        : installRow(m);
+        ? `<div class="row"><button class="btn small pin" data-pin="${m.id}" aria-pressed="${isPinned(m.id)}" title="${isPinned(m.id) ? "Shown in the top bar" : "Show in the top bar"}">${isPinned(m.id) ? "Pinned" : "Pin to top bar"}</button>
+            <span class="grow"></span><button class="quiet danger" data-remove="${m.id}">Remove</button></div>`
+        : account + installRow(m);
       return `<div class="model-card"><div class="title"><b>${esc(m.name)}</b><span class="fit-${v.fits}">${fit}</span></div>
         <div class="facts">${does} in ${m.options.steps.default} steps. ${gb(v.disk)} GB download · about ${gb(v.vram)} GB VRAM (${esc(v.label)}) ·
         ${esc(m.license)}${m.commercial ? "" : ", non-commercial"}</div>${action}</div>`;
-    }).join("") + `<p class="meta">Models live in ${esc(state.settings.modelsDir)}. Editing models (FLUX.2 klein) and smaller ones for other PCs come in the next versions.</p>`;
+    }).join("") + `<p class="meta">Models live in ${esc(state.settings.modelsDir)} <button class="info" data-help="modelsDir" aria-label="About the models folder" title="What's this?">i</button>. Removing one frees its disk space; Latent can download it again any time.</p>
+      <p class="meta">Pinned models are the ones in the top bar. With none pinned, every installed model shows there; the rest stay in the model menu either way.</p>`;
   }
   if (!installed().length) renderCanvas();
 }
 
 const SELECTS = {
   theme: ["Dark", "Light", "System"],
+  promptSize: ["Small", "Medium", "Large"],
+  format: ["PNG", "JPEG"],
   idle: ["5 minutes", "10 minutes", "30 minutes", "Never"],
   device: ["Automatic", "GPU", "CPU"],
 };
 
+const link = (url, text) => `<button class="link" data-url="${url}">${esc(text)}</button>`;
+
+/** Explainers for the settings that need one. Each returns its body; some read live facts first. */
+const HELP = {
+  hfToken: {
+    title: "Hugging Face token",
+    body: () => {
+      const gated = state.models.filter(m => m.account);
+      return `
+      <p>A few models are <b>gated</b>: their makers let anyone download them, but only from a free Hugging Face account
+      that has accepted the model's license. Latent proves which account is asking with a <b>token</b>, a password made
+      for apps, which you can delete at any time.</p>
+      <p>Models here that need one: ${gated.map(m => `<b>${esc(m.name)}</b>`).join(", ") || "none"}. The others download without it.</p>
+      <ol>
+        <li>Sign in or make a free account at ${link("https://huggingface.co/join", "huggingface.co")}.</li>
+        <li>Open each model's page and click <b>Agree and access repository</b>: ${gated.map(m => link(m.licenseUrl, m.name)).join(", ")}.</li>
+        <li>Make a token at ${link("https://huggingface.co/settings/tokens", "huggingface.co/settings/tokens")}: <b>Create new token</b>, type <b>Read</b>.</li>
+        <li>Paste it into Settings and press <b>Test</b>. Latent says whose token it is and which models it can download.</li>
+      </ol>
+      <p class="meta">The token stays in Latent's settings file on this PC and is only sent to Hugging Face, when a gated
+      model downloads. Don't share it. If it ever leaks, delete it on the tokens page and make a new one.</p>`;
+    },
+  },
+  device: {
+    title: "Run models on",
+    body: () => `
+      <p><b>Automatic</b> uses this PC's GPU when it can run models, and the CPU otherwise.
+      <b>GPU</b> insists on the graphics card; <b>CPU</b> never uses it (much slower, but works anywhere).</p>
+      <p>This PC: <b>${esc(state.hw?.gpu || "no GPU found")}</b>, running on <b>${esc(state.device.toUpperCase())}</b>.${state.hw?.note ? " " + esc(state.hw.note) : ""}</p>
+      ${state.hw?.fix ? `<p>To let the GPU run models: <code>${esc(state.hw.fix)}</code></p>` : ""}
+      <p class="meta">A change applies the next time a model loads.</p>`,
+  },
+  lowVram: {
+    title: "Prefer less VRAM",
+    body: () => `
+      <p>Some models come in more than one version: full quality, and a lighter one that stores its weights in FP8 and
+      needs a fraction of the graphics memory. Normally Latent runs the best version that fits.</p>
+      <p>Turn this on when something else needs the GPU at the same time, like a local LLM server or a game. Every
+      model then runs its lightest version, so both fit. Expect a small loss of detail.</p>
+      <p class="meta">Applies the next time a model loads. To apply it now, pick the model again in the top bar after it unloads.</p>`,
+  },
+  idle: {
+    title: "Unload an idle model",
+    body: () => `
+      <p>A loaded model keeps its memory (often 10 GB or more of VRAM) even while you're not generating. After this
+      long without a batch, Latent unloads it and the GPU is free for games and other apps.</p>
+      <p class="meta">The next batch loads it again, which takes 20 to 60 seconds. <b>Never</b> keeps it loaded until you
+      pick another model or close Latent.</p>`,
+  },
+  modelsDir: {
+    title: "Models folder",
+    body: async () => {
+      let used = "";
+      try { used = `It uses <b>${gb((await invoke("models_disk")) / 1e9)} GB</b> right now.`; } catch {}
+      return `
+      <p>Everything Latent downloads lives here: one Python environment with PyTorch (about 6 GB) and each model's
+      weights (5 to 33 GB each). ${used}</p>
+      <p>Pick a folder on a drive with room to spare. Changing the folder doesn't move what's already downloaded:
+      move the folder yourself first, then point Latent at the new place, or download the models again.</p>
+      <p><button class="btn small" data-reveal-path="${esc(state.settings.modelsDir)}">Open the folder</button></p>`;
+    },
+  },
+  format: {
+    title: "File format",
+    body: () => `
+      <p><b>PNG</b> saves the frame exactly as it came out, with its <b>recipe</b> (prompt, model, size, seed) and an
+      AI-generated mark inside the file, so Reuse works on it later.</p>
+      <p><b>JPEG</b> files are several times smaller, but have no place for the recipe or the mark.</p>
+      <p class="meta">Save as… offers both either way.</p>`,
+  },
+  preload: {
+    title: "Load the last model on start",
+    body: () => `
+      <p>Latent loads the model you used last in the background as soon as it opens, so the first batch starts
+      right away instead of waiting 20 to 60 seconds.</p>
+      <p class="meta">The model's memory is taken from the start, whether you generate or not.</p>`,
+  },
+};
+
+async function openHelp(key) {
+  const h = HELP[key];
+  if (!h) return;
+  $("#helpTitle").textContent = h.title;
+  $("#helpBody").innerHTML = await h.body();
+  openDialog("#helpDlg");
+}
+
 function renderSettings() {
   const s = state.settings;
+  const info = key => `<button class="info" data-help="${key}" aria-label="About ${esc(HELP[key].title)}" title="What's this?">i</button>`;
+  const label = (text, key) => `<span>${text}${key ? " " + info(key) : ""}</span>`;
   const select = key => `<select data-set="${key}">${SELECTS[key].map(o => `<option${o === s[key] ? " selected" : ""}>${o}</option>`).join("")}</select>`;
+  const toggle = key => `<input type="checkbox" class="switch" data-set="${key}"${s[key] ? " checked" : ""}>`;
   const folder = (key, title) => `<div class="path"><input readonly value="${esc(s[key])}"><button class="btn small" data-folder="${key}" data-title="${title}">Change…</button></div>`;
   $("#settingsBody").innerHTML = `
     <div class="set-group">Appearance</div>
-    <label class="setting"><span>Theme</span>${select("theme")}</label>
+    <label class="setting">${label("Theme")}${select("theme")}</label>
+    <label class="setting">${label("Prompt text size")}${select("promptSize")}</label>
+
     <div class="set-group">Saving</div>
-    <div class="setting"><span>Save folder</span>${folder("saveDir", "Save frames to")}</div>
-    <label class="setting"><span>Warn about unsaved frames when closing</span><input type="checkbox" data-set="warnUnsaved"${s.warnUnsaved ? " checked" : ""} style="width:auto"></label>
+    <div class="setting">${label("Save folder")}${folder("saveDir", "Save frames to")}</div>
+    <label class="setting">${label("File format", "format")}${select("format")}</label>
+    <label class="setting">${label("Warn about unsaved frames when closing")}${toggle("warnUnsaved")}</label>
+
     <div class="set-group">Models and memory</div>
-    <div class="setting"><span>Models folder</span>${folder("modelsDir", "Keep models in")}</div>
-    <label class="setting"><span>Unload an idle model after</span>${select("idle")}</label>
-    <label class="setting"><span>Run models on</span>${select("device")}</label>
-    <label class="setting"><span>Hugging Face token</span><input type="password" data-set="hfToken" value="${esc(s.hfToken)}" placeholder="Only for gated models" autocomplete="off"></label>
-    <p class="meta">Latent ${esc(state.version)} · ${esc(state.hw?.gpu || "no GPU found")}${state.hw?.note ? " · " + esc(state.hw.note) : ""}</p>`;
+    <div class="setting">${label("Models folder", "modelsDir")}${folder("modelsDir", "Keep models in")}</div>
+    <label class="setting">${label("Prefer less VRAM", "lowVram")}${toggle("lowVram")}</label>
+    <label class="setting">${label("Run models on", "device")}${select("device")}</label>
+    <label class="setting">${label("Unload an idle model after", "idle")}${select("idle")}</label>
+    <label class="setting">${label("Load the last model on start", "preload")}${toggle("preload")}</label>
+    <div class="setting">${label("Hugging Face token", "hfToken")}
+      <div class="path"><input type="password" data-set="hfToken" value="${esc(s.hfToken)}" placeholder="Only for gated models" autocomplete="off" spellcheck="false">
+      <button class="btn small" id="testTokenBtn"${s.hfToken ? "" : " disabled"}>Test</button></div></div>
+    <p class="meta token-result" id="tokenResult"></p>
+
+    <div class="set-group">About</div>
+    <p class="meta">Latent ${esc(state.version)} · ${esc(state.hw?.gpu || "no GPU found")}${state.hw?.note ? " · " + esc(state.hw.note) : ""}</p>
+    <div class="row"><button class="btn small" id="checkUpdateBtn">Check for updates</button><button class="btn small" data-reveal-path="${esc(state.logs)}">Open logs folder</button></div>`;
 }
+
+async function testToken() {
+  const out = $("#tokenResult");
+  out.className = "meta token-result";
+  out.textContent = "Asking Hugging Face…";
+  try {
+    const r = await invoke("test_hf_token", { token: state.settings.hfToken });
+    const lines = state.models.filter(m => m.account).map(m =>
+      r.access[m.id] ? `${esc(m.name)}: can download` : `${esc(m.name)}: not yet. Accept its license on ${link(m.licenseUrl, "its page")}, then test again`);
+    out.innerHTML = `Works. Signed in as <b>${esc(r.name)}</b>.<br>${lines.join("<br>")}`;
+  } catch (e) {
+    out.className = "meta token-result err";
+    out.textContent = String(e);
+  }
+}
+
+function applyPromptSize() {
+  document.documentElement.style.setProperty("--prompt-size", { Small: "21px", Medium: "26px", Large: "32px" }[state.settings.promptSize] || "26px");
+  autosize();
+}
+
+// ---------- updates, as in Mimic: the release notes are the tag message ----------
+let update = null;
+
+function notesHtml(text) {
+  let html = "", list = false;
+  for (const line of text.split("\n")) {
+    const bullet = /^\s*[-*]\s+(.*)/.exec(line), head = /^#{1,6}\s+(.*)/.exec(line);
+    if (list && !bullet) { html += "</ul>"; list = false; }
+    if (bullet) { if (!list) { html += "<ul>"; list = true; } html += `<li>${esc(bullet[1])}</li>`; }
+    else if (head) html += `<h5>${esc(head[1])}</h5>`;
+    else if (line.trim()) html += `<p>${esc(line)}</p>`;
+  }
+  return html + (list ? "</ul>" : "");
+}
+
+async function checkUpdate(quiet) {
+  try { update = await invoke("check_update"); }
+  catch (e) { if (!quiet) log(String(e), "err"); return; }
+  $("#updateBtn").hidden = !update;
+  if (update) {
+    $("#updateBtn").textContent = `Update to ${update.version}`;
+    if (!quiet) openUpdate();
+  } else if (!quiet) log("Latent is up to date.");
+}
+
+function openUpdate() {
+  if (!update) return;
+  const n = unsaved();
+  $("#upTitle").textContent = `Latent ${update.version} is ready to install`;
+  $("#upCurrent").textContent = `You have ${update.current}. Latent downloads the new version, installs it and opens again.`;
+  $("#upNotes").innerHTML = notesHtml(update.notes || "");
+  $("#upWarn").hidden = !n;
+  $("#upWarn").textContent = `${plural(n, "unsaved frame")} ${n === 1 ? "is" : "are"} cleared when Latent restarts. Save ${n === 1 ? "it" : "them"} first if you want to keep ${n === 1 ? "it" : "them"}.`;
+  $("#upStatus").textContent = "";
+  $(".up-progress").hidden = true;
+  $("#upInstall").disabled = false;
+  $("#upLater").disabled = false;
+  $("#updateDlg").classList.add("open");
+  $("#upInstall").focus();
+}
+
+async function installUpdate() {
+  $("#upInstall").disabled = true;
+  $("#upLater").disabled = true;
+  $(".up-progress").hidden = false;
+  $("#upBar").style.transform = "scaleX(0)";
+  $("#upStatus").textContent = "Downloading…";
+  trace(`installing update ${update.version}`);
+  try {
+    await invoke("install_update"); // restarts Latent when it's done
+    $("#upStatus").textContent = "Restarting…";
+  } catch (e) {
+    $("#upStatus").textContent = String(e);
+    $("#upInstall").disabled = false;
+    $("#upLater").disabled = false;
+  }
+}
+
+listen("update-progress", ({ payload }) => {
+  if (!payload.total) { $("#upStatus").textContent = `Downloading… ${(payload.done / 1e6).toFixed(1)} MB`; return; }
+  $("#upBar").style.transform = `scaleX(${payload.done / payload.total})`;
+  $("#upStatus").textContent = payload.done >= payload.total ? "Installing…" : `Downloading… ${Math.round(payload.done / payload.total * 100)}%`;
+});
 
 // ---------- render ----------
 function render() {
@@ -636,12 +864,17 @@ document.addEventListener("click", async e => {
     return render();
   }
   if (t.dataset.reveal !== undefined) return invoke("reveal", { path: frame(state.selected)?.saved });
+  if (t.dataset.help) return openHelp(t.dataset.help);
+  if (t.dataset.url) return invoke("open_url", { url: t.dataset.url }).catch(err => log(String(err), "err"));
+  if (t.dataset.revealPath) return invoke("reveal", { path: t.dataset.revealPath });
+  if (t.id === "testTokenBtn") return testToken();
   if (t.dataset.openModels !== undefined) { openDialog("#modelsDlg"); return renderModels(); }
   if (t.dataset.id && t.classList.contains("model-btn")) return selectModel(t.dataset.id);
   if (t.id === "modelsBtn") { openDialog("#modelsDlg"); return renderModels(); }
   if (t.id === "settingsBtn") { renderSettings(); return openDialog("#settingsDlg"); }
-  if (t.dataset.close !== undefined) return closeDialogs();
+  if (t.dataset.close !== undefined) return t.closest(".overlay").classList.remove("open");
   if (t.dataset.install) return installModel(t.dataset.install);
+  if (t.dataset.pin) return togglePin(t.dataset.pin);
   if (t.dataset.remove) {
     const m = state.models.find(x => x.id === t.dataset.remove);
     if (!confirm(`Delete ${m.name}'s files (${gb(variant(m).disk)} GB)? You can download it again later.`)) return;
@@ -667,6 +900,10 @@ document.addEventListener("click", async e => {
     case "delete": return deleteFrame();
   }
   switch (t.id) {
+    case "updateBtn": return openUpdate();
+    case "upInstall": return installUpdate();
+    case "upLater": if (!$("#upInstall").disabled) $("#updateDlg").classList.remove("open"); return;
+    case "checkUpdateBtn": return checkUpdate(false);
     case "genBtn": return generate();
     case "importBtn": return importSources();
     case "controlsBtn": return openControls();
@@ -686,10 +923,17 @@ document.addEventListener("change", e => {
   state.settings[key] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
   saveSettings();
   if (key === "theme") applyTheme();
+  if (key === "promptSize") applyPromptSize();
+  if (key === "lowVram" || key === "device") refreshModels();
 });
 
 document.addEventListener("input", e => {
-  if (e.target.dataset.set === "hfToken") { state.settings.hfToken = e.target.value; saveSettings(); }
+  if (e.target.dataset.set === "hfToken") {
+    state.settings.hfToken = e.target.value.trim();
+    saveSettings();
+    $("#testTokenBtn").disabled = !state.settings.hfToken;
+    $("#tokenResult").textContent = "";
+  }
   if (e.target.id === "prompt") { autosize(); state.error = null; renderPreflight(); }
   if (e.target.id === "steps") {
     const m = model();
@@ -827,14 +1071,18 @@ window.__TAURI__.window.getCurrentWindow().onCloseRequested(e => {
 // ---------- start ----------
 (async () => {
   const b = await invoke("bootstrap");
-  Object.assign(state, { settings: b.settings, hw: b.hw, device: b.device, models: b.models, sources: b.sources, frames: b.frames, resident: b.resident, version: b.version });
+  Object.assign(state, { settings: b.settings, hw: b.hw, device: b.device, models: b.models, sources: b.sources, frames: b.frames, resident: b.resident, version: b.version, logs: b.logs });
   const list = installed();
   state.model = list.some(m => m.id === b.settings.lastModel) ? b.settings.lastModel : list[0]?.id ?? "";
   applyTheme();
   render();
-  autosize();
+  applyPromptSize();
+  if (state.settings.preload && state.model && !state.resident) {
+    invoke("preload", { model: state.model, variant: null }).catch(e => log(String(e), "err"));
+  }
   log(list.length ? "Ready." : "Download a model to start.");
   $("#prompt").focus();
+  checkUpdate(true);
   setTimeout(() => $("#splash").classList.add("out"), 450);
   setTimeout(() => $("#splash").remove(), 900);
 })();

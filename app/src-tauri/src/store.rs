@@ -23,6 +23,16 @@ pub struct Settings {
     /// Aspect label, e.g. "1:1".
     pub aspect: String,
     pub last_model: String,
+    /// Prompt text size: "Small" | "Medium" | "Large".
+    pub prompt_size: String,
+    /// What Save writes: "PNG" (keeps the recipe) | "JPEG" (smaller, no recipe).
+    pub format: String,
+    /// Run each model in its lightest variant that fits, leaving VRAM for other apps (a local LLM, a game).
+    pub low_vram: bool,
+    /// Load the last model in the background when Latent starts.
+    pub preload: bool,
+    /// Models shown in the top bar, in order. Empty means every installed model.
+    pub pinned: Vec<String>,
 }
 
 impl Default for Settings {
@@ -38,6 +48,11 @@ impl Default for Settings {
             count: 2,
             aspect: "1:1".into(),
             last_model: String::new(),
+            prompt_size: "Medium".into(),
+            format: "PNG".into(),
+            low_vram: false,
+            preload: false,
+            pinned: Vec::new(),
         }
     }
 }

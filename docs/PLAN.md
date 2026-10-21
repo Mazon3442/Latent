@@ -174,7 +174,7 @@ The interface is built only against this, and this section matches the code (`ap
 | `reveal` | `path` | | built |
 | `ui_error` | `message` | | built. Appends to logs/ui.log |
 | `run_tool` | `{ tool, frame \| source }` | `{ batch }` | phase 3 |
-| `check_update`, `install_update` | | | phase 4, as in Mimic |
+| `check_update`, `install_update` | | `{ version, current, notes } \| null` | built, as in Mimic. Debug builds never offer an update; `update-progress` events while installing |
 
 The UI refers to frames and sources by id only, so it can't point the core at arbitrary files.
 

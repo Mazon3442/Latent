@@ -72,15 +72,37 @@ Not yet. The first release will ship like Mimic's:
 
 Latent will also need **[uv](https://docs.astral.sh/uv/)** to set up the models (`winget install astral-sh.uv` on Windows), and enough disk for the models you choose: 8 to 30 GB each.
 
+## Build from source
+
+Needs Rust (stable) and Node.js. On Windows, also the Microsoft C++ Build Tools. On Linux, WebKitGTK 4.1:
+
+```bash
+sudo apt install build-essential pkg-config libssl-dev libxdo-dev libwebkit2gtk-4.1-dev \
+  libayatana-appindicator3-dev librsvg2-dev nodejs npm                 # Debian / Ubuntu
+```
+
+```bash
+cd app/src-tauri
+cargo run                                                # development build (never offers updates)
+cargo run -- --install z-image-turbo                     # download a model without opening the window
+npx @tauri-apps/cli@2 build                              # Windows installer in target/release/bundle/nsis
+npx @tauri-apps/cli@2 build --bundles deb,rpm,appimage   # Linux packages
+```
+
+The interface (`app/ui`) is packed into the app at build time, so build again after editing it.
+
+Releases come from GitHub Actions: push an annotated tag such as `v0.2.0` and `.github/workflows/release.yml` builds the Windows installer and the Linux `.deb`, `.rpm` and AppImage, signs them and publishes one release with a `latest.json`. The tag's message becomes the release notes. Installed copies check that file on start and offer the update (Settings › Check for updates, too). Signing needs the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, the private half of the `pubkey` in `tauri.conf.json`.
+
 <details>
 <summary><b>Repository layout</b></summary>
 
 ```text
 app/ui/                 interface (HTML, CSS, JS; fonts bundled)
-app/src-tauri/          Rust core: model manager, installer, hardware, sources and frames
+app/src-tauri/          Rust core: model manager, installer, hardware, sources and frames, updates
 engines/                the Python worker that runs the diffusion models
 design/brand.py         draws the logo, banners and charts in docs/assets
 docs/                   the plan (docs/PLAN.md) and README assets
+.github/workflows/      the release build (tag v*.*.* to publish)
 ```
 
 </details>
