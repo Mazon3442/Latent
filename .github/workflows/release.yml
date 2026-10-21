@@ -146,17 +146,33 @@ jobs:
         id: version
         run: echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build app and dmg
-        run: npx --yes @tauri-apps/cli@2 build --bundles app,dmg --config "{\"version\":\"${{ steps.version.outputs.number }}\",\"bundle\":{\"createUpdaterArtifacts\":true}}"
+      # An unset secret still reaches the build as an empty variable, and Tauri then tries to import an empty
+      # certificate and fails ("Unable to decode the provided data"). Export the APPLE_* values only when a
+      # certificate exists, so a missing secret means an unsigned build, as intended.
+      - name: Enable Apple signing
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning::APPLE_CERTIFICATE is not set, so the macOS build is unsigned."
+            exit 0
+          fi
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!name}" ]; then
+              printf '%s<<EOF\n%s\nEOF\n' "$name" "${!name}" >> "$GITHUB_ENV"
+            fi
+          done
+
+      - name: Build app and dmg
+        run: npx --yes @tauri-apps/cli@2 build --bundles app,dmg --config "{\"version\":\"${{ steps.version.outputs.number }}\",\"bundle\":{\"createUpdaterArtifacts\":true}}"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - uses: actions/upload-artifact@v4
         with:
