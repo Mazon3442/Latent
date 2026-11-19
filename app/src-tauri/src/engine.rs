@@ -54,6 +54,19 @@ pub struct GenRequest {
     pub seed: Option<i64>,
     #[serde(default)]
     pub options: Map<String, Value>,
+    /// Run the pixel tool on every frame, so an edit of pixel art stays pixel art.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel: Option<crate::pixel::Spec>,
+}
+
+/// Turns a finished frame into pixel art in place: the same size and colors as the picture it was made from, when there
+/// is one. Returns the new size. The file keeps the recipe and the AI-generated mark.
+fn pixelate(spec: &crate::pixel::Spec, source: Option<&String>, output: &str, recipe: &Value) -> Result<(u32, u32), String> {
+    let generated = image::open(output).map_err(|e| e.to_string())?.to_rgba8();
+    let source = source.and_then(|p| image::open(p).ok()).map(|i| i.to_rgba8());
+    let out = crate::pixel::run(&generated, &spec.options(source.as_ref()))?;
+    crate::pixel::write_png(std::path::Path::new(output), &out, recipe, true)?;
+    Ok(out.dimensions())
 }
 
 impl GenRequest {
@@ -70,6 +83,9 @@ impl GenRequest {
             if !(256..=largest).contains(&side) || side % m.grid != 0 {
                 return Err(format!("{} needs sizes from 256 to {largest} px in steps of {}", m.name, m.grid));
             }
+        }
+        if let Some(p) = &self.pixel {
+            p.check()?;
         }
         if !self.sources.is_empty() && !m.can.edit {
             return Err(format!("{} makes new images; pick a model that can edit", m.name));
@@ -242,14 +258,25 @@ impl Manager {
             *self.running.lock().unwrap() = Some((batch.to_string(), None));
             match result {
                 Ok(v) if v["event"] == "done" => {
+                    let mut thumb = v["thumb"].as_str().unwrap_or_default().to_string();
+                    let (mut width, mut height) = (req.width, req.height);
+                    if let Some(spec) = &req.pixel {
+                        // Keep it pixel art: the same size and colors as what it was made from, when there is a source.
+                        match pixelate(spec, sources.first(), &output, &recipe) {
+                            Ok((w, h)) => (thumb, width, height) = (output.clone(), w, h),
+                            Err(e) => {
+                                let _ = app.emit("log", format!("Couldn't pixelate frame {}: {e}", i + 1));
+                            }
+                        }
+                    }
                     let frame = Frame {
                         id: id.clone(),
                         batch: batch.to_string(),
                         index: i,
                         path: output,
-                        thumb: v["thumb"].as_str().unwrap_or_default().to_string(),
-                        width: req.width,
-                        height: req.height,
+                        thumb,
+                        width,
+                        height,
                         seed,
                         recipe,
                         model: m.id.to_string(),

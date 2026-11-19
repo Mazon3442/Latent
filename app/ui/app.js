@@ -72,8 +72,10 @@ function toggleSource(id) {
   render();
 }
 const frame = id => state.frames.find(f => f.id === id);
+// Pixel art: made by the pixel tool, or a generated frame that was kept pixelated.
+const isPixel = f => f?.model === "pixel" || !!f?.recipe?.pixel;
 const unsaved = () => state.frames.filter(f => !f.saved).length;
-const modelName = id => state.models.find(m => m.id === id)?.name ?? id;
+const modelName = id => id === "pixel" ? "Pixel tool" : state.models.find(m => m.id === id)?.name ?? id;
 
 function log(text, kind = "") {
   const el = $("#log");
@@ -248,7 +250,7 @@ function renderComposer() {
   else if (state.attached.length > 1) $("#recipe").innerHTML = `Combine ${tok("photo", `<img src="${fileSrc(photo.path)}" alt="">${state.attached.length} photos`)} with ${tok("model", esc(m.name))} · ${count}`;
   else if (photo) $("#recipe").innerHTML = `Edit ${tok("photo", `<img src="${fileSrc(photo.path)}" alt="">${esc(photo.name)}`)} with ${tok("model", esc(m.name))} · ${count}`;
   else $("#recipe").innerHTML = `Make it with ${tok("model", esc(m.name))} at ${tok("aspect", sizeFor(m).aspect)} · ${count}`;
-  $("#controlsBtn .dot").hidden = state.steps === null && state.seed === "";
+  $("#controlsBtn .dot").hidden = state.steps === null && state.seed === "" && !pg.on;
   renderPreflight();
 }
 
@@ -370,7 +372,7 @@ function renderControls() {
         <span class="ctl-val ${state.seed === "" ? "def" : ""}">${state.seed === "" ? "random" : esc(state.seed)}</span></div>
       <input type="text" id="seed" inputmode="numeric" placeholder="Random" value="${esc(state.seed)}" aria-labelledby="ctl-seed" autocomplete="off" spellcheck="false">
       <p>The same seed, prompt and settings make the same image. Frames in a batch use the seeds after it.</p>
-    </div>`;
+    </div>` + pixelControls();
 }
 
 function openControls(open = !$("#controls").classList.contains("open")) {
@@ -394,6 +396,7 @@ async function generate() {
     model: m.id, prompt: $("#prompt").value.trim(), sources: state.attached, width: s.width, height: s.height,
     count: state.settings.count, seed, options: state.steps !== null ? { steps: state.steps } : {},
   };
+  if (pg.on) request.pixel = { size: pg.size, colors: Math.round(pg.colors), keepPalette: pg.keepPalette && state.attached.length > 0, fit: pg.fit, clean: true };
   state.error = null;
   // Set before the command returns: a warm model can report its first step before the batch id arrives.
   state.run = { batch: null, count: request.count, model: m.id, aspect: s.aspect, width: s.width, height: s.height, prompt: request.prompt,
@@ -456,6 +459,8 @@ function renderCanvas() {
     return;
   }
   if (f) {
+    preview.classList.toggle("px", isPixel(f));
+    $("#canvasImg").classList.toggle("px", isPixel(f));
     if (preview.dataset.frame !== f.id) { preview.src = fileSrc(f.thumb); preview.dataset.frame = f.id; }
     showFull(f.path);
     return;
@@ -528,8 +533,9 @@ Download ${m.name}?`)) return;
 
 // ---------- frames: each batch is a card like a Mimic take, newest first ----------
 function tile(f, live) {
-  return `<button class="tile" role="option" data-frame="${f.id}" aria-selected="${f.id === state.selected && !(live && state.follow)}" style="--ar:${f.width} / ${f.height}" title="Seed ${f.seed}">
-    <img src="${fileSrc(f.thumb)}" alt="Frame ${f.index + 1}, seed ${f.seed}" loading="lazy">${f.saved ? '<span class="saved" title="Saved"></span>' : ""}</button>`;
+  const px = isPixel(f);
+  return `<button class="tile" role="option" data-frame="${f.id}" aria-selected="${f.id === state.selected && !(live && state.follow)}" style="--ar:${f.width} / ${f.height}" title="${px ? "Pixel art" : `Seed ${f.seed}`}">
+    <img${px ? ' class="px"' : ""} src="${fileSrc(f.thumb)}" alt="${px ? `Pixel art ${f.width} by ${f.height}` : `Frame ${f.index + 1}, seed ${f.seed}`}" loading="lazy">${f.saved ? '<span class="saved" title="Saved"></span>' : ""}</button>`;
 }
 
 function renderFrames() {
@@ -569,11 +575,15 @@ function renderFrames() {
       detail = `<p class="take-text">${esc(prompt)}</p>`;
       if (!live && sel) {
         detail += sel.saved ? `<p class="take-path">Saved to ${REMOTE ? esc(sel.saved) : `<button data-reveal>${esc(sel.saved)}</button>`}</p>`
+                            : sel.recipe?.tool ? `<p class="take-path">${esc(sel.recipe.label || "Pixel art")} · ${sel.width} × ${sel.height} pixels</p>`
                             : `<p class="take-path">Frame ${sel.index + 1} · seed ${sel.seed} · ${sel.width} × ${sel.height} · made in ${sel.elapsed.toFixed(1)} s</p>`;
         detail += `<div class="take-actions">
           <button class="btn" data-act="save" ${sel.saved ? "disabled" : ""} title="Ctrl S">Save</button>
           ${REMOTE ? "" : '<button class="btn" data-act="saveas" title="Ctrl Shift S">Save as…</button>'}
-          <button class="btn" data-act="reuse" title="Put this frame's prompt and settings back (R)">Reuse</button>
+          <button class="btn" data-act="pixel" title="Turn this frame into pixel art">Pixel art…</button>
+          ${isPixel(sel) ? '<button class="btn" data-act="erase" title="Drag over text, swatches or arrows to erase them">Erase areas…</button>' : ""}
+          ${REMOTE ? "" : '<button class="btn" data-act="mc" title="Save as a Minecraft GUI texture">Minecraft…</button>'}
+          <button class="btn" data-act="reuse" ${sel.recipe?.tool ? "disabled" : ""} title="Put this frame's prompt and settings back (R)">Reuse</button>
           <button class="btn" data-act="source" title="Edit this frame next (E)">Use as source</button>
           <button class="btn" data-act="delete" title="Delete">Delete</button></div>`;
       }
@@ -587,6 +597,7 @@ function renderFrames() {
 }
 
 function select(id) {
+  stopErase();
   state.selected = id;
   state.follow = false;
   renderFrames();
@@ -626,7 +637,7 @@ async function saveFrame(as = false) {
 
 function reuse() {
   const f = frame(state.selected);
-  if (!f) return;
+  if (!f || f.recipe?.tool) return;
   const r = f.recipe;
   $("#prompt").value = r.prompt;
   autosize();
@@ -636,6 +647,8 @@ function reuse() {
   state.steps = r.options?.steps ?? null;
   state.seed = String(r.seed);
   state.attached = (r.sources || []).filter(id => state.sources.some(x => x.id === id));
+  if (r.pixel) Object.assign(pg, { on: true, ...r.pixel }); else pg.on = false;
+  savePg();
   render();
   log(`Reused frame ${f.index + 1}'s recipe, seed included. Set the seed back to random in Controls for new variations.`);
 }
@@ -662,6 +675,333 @@ async function deleteFrame() {
   state.frames = state.frames.filter(x => x !== f);
   state.selected = (order[i + 1] || order[i - 1])?.id ?? null;
   render();
+}
+
+// ---------- pixel art, GUI kit and Minecraft export ----------
+const PIXEL_SIZES = [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256];
+const pixel = { size: 0, colors: 16, palette: "", clean: true, outline: false, fit: "keep", target: null, busy: false };
+const KIT_LOOKS = [["leather", "Leather"], ["crimson", "Crimson leather"], ["parchment", "Parchment"], ["iron", "Iron"], ["arcane", "Arcane"], ["forest", "Forest"], ["custom", "Custom colors"]];
+const kit = { kind: "gui", look: "leather", base: "#713f28", accent: "#e0731c", grain: 1, busy: false };
+const mc = { modid: "", name: "", kind: "sprite", scaling: "nine_slice", border: [4, 4, 4, 4], busy: false, target: null, size: [0, 0], kit: null, kitAll: false, folder: "kit" };
+try { mc.modid = localStorage.getItem("latent.mcModid") || ""; } catch {}
+
+// What the pixel tool works on: the selected frame, else the source attached to the prompt, else the newest source.
+function pixelTarget() {
+  const f = frame(state.selected);
+  if (f) return { frame: f.id, label: f.recipe?.tool ? "this pixel art" : `frame ${f.index + 1}` };
+  const s = state.sources.find(x => state.attached.includes(x.id)) ?? state.sources[0];
+  return s ? { source: s.id, label: s.name } : null;
+}
+
+function openPixel() {
+  pixel.target = pixelTarget();
+  if (!pixel.target) return log("Select a frame or import a picture first.", "warn");
+  renderPixel();
+  openDialog("#pixelDlg");
+}
+
+function renderPixel(msg = "", err = false) {
+  const t = pixel.target;
+  $("#pixelBody").innerHTML = `
+    <p class="tool-note">Cleans <b>${esc(t.label)}</b> up into real pixel art: it snaps the picture to a pixel grid, keeps the dominant color of each cell,
+      and limits the colors. The result is a new frame at its true size, ready for a texture. Nothing runs on the GPU.</p>
+    <label class="setting"><span>Size (longer side)</span><select data-px="size"><option value="0"${pixel.size === 0 ? " selected" : ""}>Auto: find the picture's own pixel size</option>${PIXEL_SIZES.map(n => `<option value="${n}"${n === pixel.size ? " selected" : ""}>${n} pixels${n <= 16 ? " (icon)" : ""}</option>`).join("")}</select></label>
+    <label class="setting"><span>Shape</span><select data-px="fit">${FITS.map(([v, l]) => `<option value="${v}"${v === pixel.fit ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+    <label class="setting"><span>Colors</span><input type="number" min="2" max="64" data-px="colors" value="${pixel.colors}"></label>
+    <label class="setting"><span>Palette (optional)</span><textarea data-px="palette" spellcheck="false" placeholder="#1a1c2c&#10;#5d275d&#10;One hex color per line, or paste a GIMP .gpl. Replaces Colors.">${esc(pixel.palette)}</textarea></label>
+    <label class="setting"><span>Absorb lone pixels</span><input type="checkbox" class="switch" data-px="clean"${pixel.clean ? " checked" : ""}></label>
+    <label class="setting"><span>Outline see-through edges</span><input type="checkbox" class="switch" data-px="outline"${pixel.outline ? " checked" : ""}></label>
+    <div class="tool-foot"><span class="tool-msg${err ? " err" : ""}" aria-live="polite">${esc(msg)}</span>
+      <button class="btn live" id="pixelApply"${pixel.busy ? " disabled" : ""}>${pixel.busy ? "Working…" : "Make pixel art"}</button></div>`;
+}
+
+$("#pixelBody").addEventListener("input", e => {
+  const k = e.target.dataset.px;
+  if (!k) return;
+  const v = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+  pixel[k] = k === "size" || k === "colors" ? Number(v) : v;
+});
+
+// A batch of new frames from a tool becomes the current selection.
+function takeFrames(frames, select) {
+  state.frames.push(...frames);
+  state.selected = select.id;
+  state.follow = false;
+  render();
+}
+
+async function applyPixel() {
+  const t = pixel.target;
+  if (!t || pixel.busy) return;
+  pixel.busy = true;
+  renderPixel();
+  try {
+    const f = await invoke("pixelize", {
+      frame: t.frame ?? null, source: t.source ?? null,
+      options: { size: pixel.size, colors: Math.round(pixel.colors), palette: pixel.palette, clean: pixel.clean, outline: pixel.outline, fit: pixel.fit },
+    });
+    pixel.busy = false;
+    $("#pixelDlg").classList.remove("open");
+    takeFrames([f], f);
+    log(`Made ${f.width} × ${f.height} pixel art${pixel.size === 0 ? " (found its own pixel size, or 64 if it has none)" : ""}.`);
+  } catch (e) {
+    pixel.busy = false;
+    renderPixel(String(e), true);
+  }
+}
+
+
+// ----- Keep results pixelated: the pixel tool runs on every new frame -----
+const pg = { on: false, size: 0, colors: 16, keepPalette: true, fit: "keep" };
+try { Object.assign(pg, JSON.parse(localStorage.getItem("latent.pixelGen") || "{}")); } catch {}
+const savePg = () => { try { localStorage.setItem("latent.pixelGen", JSON.stringify(pg)); } catch {} };
+const FITS = [["keep", "Keep proportions"], ["crop", "Square, cut the middle"], ["pad", "Square, add margins"]];
+
+function pixelControls() {
+  const src = state.attached.length > 0;
+  const sizes = [[0, src ? "Match the source" : "Auto (64 for a new image)"], ...PIXEL_SIZES.filter(n => n > 0).map(n => [n, `${n} pixels`])];
+  return `<div class="ctl">
+    <div class="ctl-top"><b id="ctl-pixel">Keep results pixelated</b><input type="checkbox" class="switch" data-pg="on"${pg.on ? " checked" : ""} aria-labelledby="ctl-pixel"></div>
+    <p>Runs the pixel tool on every new frame, so editing pixel art gives pixel art back, at the source's size and in its colors.</p>
+    ${pg.on ? `
+    <label class="ctl-row"><span>Size (longer side)</span><select data-pg="size">${sizes.map(([v, l]) => `<option value="${v}"${v === pg.size ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+    ${src ? `<label class="ctl-row inline"><span>Keep the source's colors</span><input type="checkbox" class="switch" data-pg="keepPalette"${pg.keepPalette ? " checked" : ""}></label>` : ""}
+    ${src && pg.keepPalette ? "" : `<label class="ctl-row"><span>Colors</span><input type="number" min="2" max="64" data-pg="colors" value="${pg.colors}"></label>`}
+    <label class="ctl-row"><span>Shape</span><select data-pg="fit">${FITS.map(([v, l]) => `<option value="${v}"${v === pg.fit ? " selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}
+  </div>`;
+}
+
+$("#controlsBody").addEventListener("input", e => {
+  const k = e.target.dataset.pg;
+  if (!k) return;
+  const v = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+  pg[k] = k === "size" || k === "colors" ? Number(v) : v;
+  savePg();
+  renderComposer();
+});
+// Switching on or off, or keeping the source's colors, changes which fields show.
+$("#controlsBody").addEventListener("change", e => { if (["on", "keepPalette"].includes(e.target.dataset.pg)) renderControls(); });
+
+// ----- Erase areas: drag over text, swatches or arrows on pixel art to take them off -----
+const erase = { on: false, frame: null, rects: [], drag: null, busy: false, hover: null };
+
+// Where the picture sits inside the canvas (it is centered and scaled to fit), in canvas coordinates.
+function imageBox() {
+  const img = $("#canvasImg"), canvas = $("#canvas").getBoundingClientRect(), b = img.getBoundingClientRect();
+  const nw = img.naturalWidth, nh = img.naturalHeight;
+  const k = Math.min(b.width / nw, b.height / nh);
+  return { left: b.left - canvas.left + (b.width - nw * k) / 2, top: b.top - canvas.top + (b.height - nh * k) / 2, k, w: nw * k, h: nh * k, nw, nh };
+}
+
+function startErase() {
+  const f = frame(state.selected);
+  if (!isPixel(f) || !$("#canvasImg").naturalWidth) return;
+  Object.assign(erase, { on: true, frame: f.id, rects: [], drag: null, busy: false, hover: null });
+  renderErase();
+}
+
+function stopErase() {
+  if (!erase.on) return;
+  erase.on = false;
+  $("#eraseLayer").hidden = true;
+  $("#eraseBar").hidden = true;
+}
+
+function eraseRect(a, b) {
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(a[0] - b[0]) + 1, Math.abs(a[1] - b[1]) + 1];
+}
+
+function renderErase(msg = "", err = false) {
+  if (!erase.on) return;
+  const box = imageBox(), layer = $("#eraseLayer");
+  Object.assign(layer.style, { left: `${box.left}px`, top: `${box.top}px`, width: `${box.w}px`, height: `${box.h}px` });
+  const all = erase.drag ? [...erase.rects, eraseRect(erase.drag.start, erase.drag.now)] : erase.rects;
+  layer.innerHTML = all.map(([x, y, w, h]) => `<div class="erase-box" style="left:${x * box.k}px;top:${y * box.k}px;width:${w * box.k}px;height:${h * box.k}px"></div>`).join("");
+  layer.hidden = false;
+  const n = erase.rects.length;
+  $("#eraseInfo").textContent = msg || (n
+    ? `${plural(n, "area")} marked${erase.hover ? ` · ${erase.hover[0]}, ${erase.hover[1]}` : ""}`
+    : `Drag over what to erase${erase.hover ? ` · ${erase.hover[0]}, ${erase.hover[1]}` : ""}`);
+  $("#eraseInfo").className = err ? "err" : "";
+  $("#eraseUndo").disabled = !n || erase.busy;
+  $("#eraseApply").disabled = !n || erase.busy;
+  $("#eraseApply").textContent = erase.busy ? "Erasing…" : "Erase";
+  $("#eraseBar").hidden = false;
+}
+
+function erasePoint(e) {
+  const box = imageBox(), r = $("#eraseLayer").getBoundingClientRect();
+  return [Math.max(0, Math.min(box.nw - 1, Math.floor((e.clientX - r.left) / box.k))), Math.max(0, Math.min(box.nh - 1, Math.floor((e.clientY - r.top) / box.k)))];
+}
+
+$("#eraseLayer").addEventListener("pointerdown", e => {
+  if (erase.busy) return;
+  e.preventDefault();
+  try { $("#eraseLayer").setPointerCapture(e.pointerId); } catch {}
+  const p = erasePoint(e);
+  erase.drag = { start: p, now: p };
+  renderErase();
+});
+$("#eraseLayer").addEventListener("pointermove", e => {
+  erase.hover = erasePoint(e);
+  if (erase.drag) erase.drag.now = erase.hover;
+  renderErase();
+});
+$("#eraseLayer").addEventListener("pointerup", () => {
+  if (!erase.drag) return;
+  erase.rects.push(eraseRect(erase.drag.start, erase.drag.now));
+  erase.drag = null;
+  renderErase();
+});
+addEventListener("resize", () => renderErase());
+
+async function applyErase() {
+  if (!erase.on || erase.busy || !erase.rects.length) return;
+  erase.busy = true;
+  renderErase();
+  const box = imageBox();
+  // A pixel of margin all round, so the soft edge of text and shapes goes with them.
+  const rects = erase.rects.map(([x, y, w, h]) => {
+    const x0 = Math.max(0, x - 1), y0 = Math.max(0, y - 1);
+    return [x0, y0, Math.min(box.nw, x + w + 1) - x0, Math.min(box.nh, y + h + 1) - y0];
+  });
+  try {
+    const f = await invoke("erase_regions", { frame: erase.frame, rects });
+    stopErase();
+    takeFrames([f], f);
+    log(`Erased ${plural(rects.length, "area")}. The frame before it is still there.`);
+  } catch (e) {
+    erase.busy = false;
+    renderErase(String(e), true);
+  }
+}
+
+// ----- GUI kit -----
+function openKit() {
+  renderKit();
+  openDialog("#kitDlg");
+}
+
+function renderKit(msg = "", err = false) {
+  const custom = kit.look === "custom";
+  $("#kitBody").innerHTML = `
+    <p class="tool-note">${kit.kind === "book"
+      ? `Draws a <b>Field Guide</b>: an open book with ring binding and a ribbon, torn parchment windows, a brush label, swatches, arrows and ink rules. No text is drawn, since Minecraft draws its own.`
+      : `Draws a matching set of GUI sprites pixel by pixel: <b>panel, inset, slot, three button states and a progress bar</b>.`}
+      Each material is a five-tone ramp lit from the top left, with dark-tone outlines. Edges sit exactly on the pixel grid,
+      which a diffusion model can't do. You get a preview screen and one frame per sprite, ready to save for Minecraft.</p>
+    <label class="setting"><span>Kit</span><select data-kit="kind">
+      <option value="gui"${kit.kind === "gui" ? " selected" : ""}>GUI set (panel, buttons, slots, bars)</option>
+      <option value="book"${kit.kind === "book" ? " selected" : ""}>Field Guide book (pages, rings, swatches)</option></select></label>
+    <label class="setting"><span>${kit.kind === "book" ? "Cover" : "Look"}</span><select data-kit="look">${KIT_LOOKS.map(([v, l]) => `<option value="${v}"${kit.look === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+    ${custom ? `<label class="setting"><span>${kit.kind === "book" ? "Cover color" : "Main color"}</span><input type="color" data-kit="base" value="${esc(kit.base)}"></label>
+    <label class="setting"><span>${kit.kind === "book" ? "Accent (ribbon, arrows)" : "Accent (hover, bar)"}</span><input type="color" data-kit="accent" value="${esc(kit.accent)}"></label>` : ""}
+    <label class="setting"><span>Grain</span><select data-kit="grain">${["Smooth", "Light", "Rough"].map((l, i) => `<option value="${i}"${kit.grain === i ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+    <div class="tool-foot"><span class="tool-msg${err ? " err" : ""}" aria-live="polite">${esc(msg)}</span>
+      <button class="btn live" id="kitApply"${kit.busy ? " disabled" : ""}>${kit.busy ? "Drawing…" : "Make kit"}</button></div>`;
+}
+
+$("#kitBody").addEventListener("input", e => {
+  const k = e.target.dataset.kit;
+  if (k) kit[k] = k === "grain" ? Number(e.target.value) : e.target.value;
+});
+$("#kitBody").addEventListener("change", e => { if (["look", "kind"].includes(e.target.dataset.kit)) renderKit(); });
+
+async function applyKit() {
+  if (kit.busy) return;
+  kit.busy = true;
+  renderKit();
+  try {
+    const frames = await invoke("make_kit", {
+      options: { kind: kit.kind, look: kit.look, base: kit.base, accent: kit.look === "custom" ? kit.accent : "", grain: kit.grain },
+    });
+    kit.busy = false;
+    $("#kitDlg").classList.remove("open");
+    takeFrames(frames, frames[0]);
+    log(`Drew ${frames.length - 1} ${kit.kind === "book" ? "pieces" : "sprites"} and a preview.${REMOTE ? "" : " Minecraft… saves the whole kit into your mod's folders."}`);
+  } catch (e) {
+    kit.busy = false;
+    renderKit(String(e), true);
+  }
+}
+
+// ----- Minecraft export -----
+function openMinecraft() {
+  const f = frame(state.selected);
+  if (!f) return;
+  mc.target = f.id;
+  mc.size = [f.width, f.height];
+  mc.kit = f.recipe?.tool === "kit" ? f.batch : null;
+  mc.kitAll = !!mc.kit;
+  const m = f.recipe?.mc;
+  if (m) {
+    // One sprite of a kit: its own name, and the scaling it was drawn for.
+    mc.kind = "sprite";
+    mc.name = `${mc.folder ? mc.folder + "/" : ""}${m.name}`;
+    mc.scaling = m.scaling;
+    mc.border = m.border.map(b => b || 4);
+  }
+  renderMinecraft();
+  openDialog("#mcDlg");
+}
+
+function renderMinecraft(msg = "", err = false) {
+  const [w, h] = mc.size;
+  const sprite = mc.kind === "sprite";
+  const all = mc.kit && mc.kitAll;
+  $("#mcBody").innerHTML = `
+    <p class="tool-note">${all
+      ? `Writes every sprite of this kit, each with the scaling it was drawn for, into a resource-pack folder structure inside your save folder, under <code>Minecraft/assets/</code>.`
+      : `Writes a <b>${w} × ${h}</b> texture into a resource-pack folder structure inside your save folder, under <code>Minecraft/assets/</code>.
+         Java 1.20.2 and later draw GUI sprites with a scaling rule in a <code>.png.mcmeta</code> file; this writes it for you.`}</p>
+    ${mc.kit ? `<label class="setting"><span>Save the whole kit</span><input type="checkbox" class="switch" data-mc="kitAll"${mc.kitAll ? " checked" : ""}></label>` : ""}
+    <label class="setting"><span>Mod id</span><input data-mc="modid" value="${esc(mc.modid)}" placeholder="yourmod" spellcheck="false"></label>
+    ${all
+      ? `<label class="setting"><span>Folder</span><input data-mc="folder" value="${esc(mc.folder)}" placeholder="kit" spellcheck="false"></label>`
+      : `<label class="setting"><span>Texture name</span><input data-mc="name" value="${esc(mc.name)}" placeholder="widget/panel" spellcheck="false"></label>
+    <label class="setting"><span>Kind</span><select data-mc="kind">
+      <option value="sprite"${sprite ? " selected" : ""}>GUI sprite (textures/gui/sprites, scaled by rule)</option>
+      <option value="texture"${sprite ? "" : " selected"}>Whole screen texture (textures/gui, drawn as is)</option></select></label>
+    ${sprite ? `<label class="setting"><span>Scaling</span><select data-mc="scaling">
+      ${[["nine_slice", "Nine-slice (panels, buttons: corners stay, middle stretches)"], ["tile", "Tile (repeats)"], ["stretch", "Stretch (the default)"]].map(([v, l]) => `<option value="${v}"${mc.scaling === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}
+    ${sprite && mc.scaling === "nine_slice" ? `<div class="setting"><span>Border (left, top, right, bottom)</span><div class="quad">
+      ${mc.border.map((b, i) => `<input type="number" min="1" max="${Math.max(w, h)}" data-mcb="${i}" value="${b}" aria-label="Border ${["left", "top", "right", "bottom"][i]}">`).join("")}</div></div>` : ""}`}
+    <div class="tool-foot"><span class="tool-msg${err ? " err" : ""}" aria-live="polite">${esc(msg)}</span>
+      <button class="btn live" id="mcApply"${mc.busy ? " disabled" : ""}>${mc.busy ? "Saving…" : all ? "Save kit" : "Save"}</button></div>`;
+}
+
+$("#mcBody").addEventListener("input", e => {
+  if (e.target.dataset.mcb !== undefined) mc.border[Number(e.target.dataset.mcb)] = Math.max(0, Math.round(Number(e.target.value)) || 0);
+  else if (e.target.dataset.mc) mc[e.target.dataset.mc] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+});
+// Choosing a kind or scaling, or the whole kit, changes which fields show.
+$("#mcBody").addEventListener("change", e => { if (e.target.matches("select, input[type=checkbox]")) renderMinecraft(); });
+
+async function applyMinecraft() {
+  if (mc.busy) return;
+  mc.busy = true;
+  renderMinecraft();
+  try {
+    const all = mc.kit && mc.kitAll;
+    const result = all
+      ? await invoke("export_kit", { batch: mc.kit, modid: mc.modid.trim(), folder: mc.folder })
+      : await invoke("export_gui", { id: mc.target, export: { modid: mc.modid.trim(), name: mc.name.trim(), kind: mc.kind, scaling: mc.scaling, border: mc.border } });
+    try { localStorage.setItem("latent.mcModid", mc.modid.trim()); } catch {}
+    if (all) {
+      state.frames.filter(x => x.batch === mc.kit && x.recipe?.mc).forEach((x, i) => { x.saved = result[i]; });
+      log(`Saved ${result.length} sprites to ${result[0].replace(/[^/\\]*$/, "")}`);
+    } else {
+      const f = frame(mc.target);
+      if (f) f.saved = result;
+      log(`Saved ${result}`);
+    }
+    mc.busy = false;
+    $("#mcDlg").classList.remove("open");
+    renderFrames();
+  } catch (e) {
+    mc.busy = false;
+    renderMinecraft(String(e), true);
+  }
 }
 
 // ---------- status ----------
@@ -1067,6 +1407,9 @@ document.addEventListener("click", async e => {
     case "save": return saveFrame();
     case "saveas": return saveFrame(true);
     case "reuse": return reuse();
+    case "pixel": return openPixel();
+    case "erase": return startErase();
+    case "mc": return openMinecraft();
     case "source": return toSource();
     case "delete": return deleteFrame();
   }
@@ -1077,6 +1420,14 @@ document.addEventListener("click", async e => {
     case "checkUpdateBtn": return checkUpdate(false);
     case "genBtn": return generate();
     case "importBtn": return importSources();
+    case "pixelBtn": return openPixel();
+    case "eraseUndo": erase.rects.pop(); return renderErase();
+    case "eraseCancel": return stopErase();
+    case "eraseApply": return applyErase();
+    case "kitBtn": return openKit();
+    case "kitApply": return applyKit();
+    case "pixelApply": return applyPixel();
+    case "mcApply": return applyMinecraft();
     case "controlsBtn": return openControls();
     case "controlsClose": return openControls(false);
     case "controlsReset": state.steps = null; state.seed = ""; renderControls(); return renderComposer();
@@ -1132,6 +1483,7 @@ document.addEventListener("keydown", e => {
   if (ctrl && e.key === "Enter") { e.preventDefault(); return generate(); }
   if (e.key === "Escape") {
     if (closeMenu() || closeDialogs()) return;
+    if (erase.on) return stopErase();
     if ($("#controls").classList.contains("open")) return openControls(false);
     if (state.run) return cancel();
     if (typing) return e.target.blur();

@@ -173,6 +173,11 @@ The interface is built only against this, and this section matches the code (`ap
 | `pick_folder` | `title` | `path \| null` | built |
 | `reveal` | `path` | | built |
 | `ui_error` | `message` | | built. Appends to logs/ui.log |
+| `pixelize` | `frame?, source?, options: { size, colors, palette, clean, outline }` | `Frame` | built. Pixel tool (`pixel.rs`): k-centroid grid downscale, palette, cleanup. Pure Rust, no GPU. The result is a new frame with `model: "pixel"` |
+| `erase_regions` | `frame, rects: [x, y, w, h][]` | `Frame` | built. Fills each area of a pixel-art frame from the pixels around it, using only the image's own colors, and takes the darker ink touching a loose box too (`pixel::erase`). A new frame |
+| `make_kit` | `options: { look, base, accent, grain }` | `Frame[]` | built. GUI kit (`kit.rs`): preview screen plus panel, inset, slot, 3 button states, bar track and fill, drawn pixel by pixel. One batch; each sprite's recipe has `mc: { name, scaling, border }` |
+| `export_kit` | `batch, modid, folder` | `path[]` | built. Saves every sprite of a kit batch with its own scaling. Checked as a whole before anything is written. Host only |
+| `export_gui` | `id, export: { modid, name, kind, scaling, border }` | `path` | built. Writes `Minecraft/assets/<modid>/textures/gui/...png` and the `.png.mcmeta` (`minecraft.rs`). Host only |
 | `run_tool` | `{ tool, frame \| source }` | `{ batch }` | phase 3 |
 | `check_update`, `install_update` | | `{ version, current, notes } \| null` | built, as in Mimic. Debug builds never offer an update; `update-progress` events while installing |
 

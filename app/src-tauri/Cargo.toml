@@ -21,6 +21,8 @@ getrandom = "0.2"
 if-addrs = "0.15"
 # Sources: decode what people import or paste, scale it down, store it as PNG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# The pixel tool writes PNGs itself so they carry the same recipe and AI-generated marks as generated frames.
+png = "0.17"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

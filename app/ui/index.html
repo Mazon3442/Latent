@@ -49,6 +49,15 @@
         <img class="canvas-img full" id="canvasImg" alt="">
         <div class="canvas-empty" id="canvasEmpty"></div>
         <div class="canvas-step" id="canvasStep" hidden></div>
+        <div class="erase-layer" id="eraseLayer" hidden></div>
+        <div class="erase-bar" id="eraseBar" hidden>
+          <span id="eraseInfo"></span>
+          <span class="erase-actions">
+            <button class="btn small" id="eraseUndo">Undo</button>
+            <button class="btn small" id="eraseCancel">Cancel</button>
+            <button class="btn small live" id="eraseApply">Erase</button>
+          </span>
+        </div>
       </div>
       <textarea class="prompt" id="prompt" rows="1" spellcheck="true" placeholder="Describe the image to make." aria-label="Prompt"></textarea>
       <div class="composer">
@@ -67,6 +76,10 @@
       <div class="col-head">
         <h2>Frames</h2>
         <span class="meta" id="unsaved"></span>
+        <span class="head-actions">
+          <button class="btn small" id="kitBtn" title="Draw a matching set of GUI sprites">GUI kit…</button>
+          <button class="btn small" id="pixelBtn" title="Turn the selected frame or source into pixel art">Pixel art…</button>
+        </span>
       </div>
       <div class="scroll" id="frameList" role="listbox" aria-label="Frames"></div>
       <p class="col-note">Frames stay in a temporary cache until you save them. Unsaved frames are cleared when Latent closes.</p>
@@ -125,6 +138,33 @@
       <button class="btn icon" data-close aria-label="Close" title="Close (Esc)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
     </div>
     <div class="dlg-body help-body" id="helpBody"></div>
+  </div>
+</div>
+
+<div class="overlay" id="pixelDlg">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="pixelTitle">
+    <div class="dlg-head"><h3 id="pixelTitle">Pixel art</h3>
+      <button class="btn icon" data-close aria-label="Close" title="Close (Esc)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="dlg-body" id="pixelBody"></div>
+  </div>
+</div>
+
+<div class="overlay" id="kitDlg">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="kitTitle">
+    <div class="dlg-head"><h3 id="kitTitle">GUI kit</h3>
+      <button class="btn icon" data-close aria-label="Close" title="Close (Esc)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="dlg-body" id="kitBody"></div>
+  </div>
+</div>
+
+<div class="overlay" id="mcDlg">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="mcTitle">
+    <div class="dlg-head"><h3 id="mcTitle">Save for Minecraft</h3>
+      <button class="btn icon" data-close aria-label="Close" title="Close (Esc)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="dlg-body" id="mcBody"></div>
   </div>
 </div>
 

@@ -1811,6 +1811,7 @@ dependencies = [
  "if-addrs",
  "image",
  "libc",
+ "png 0.17.16",
  "serde",
  "serde_json",
  "sysinfo",

@@ -5,8 +5,11 @@ mod caelestia;
 mod engine;
 mod hw;
 mod install;
+mod kit;
 mod library;
+mod minecraft;
 mod models;
+mod pixel;
 mod remote;
 mod store;
 mod worker;
@@ -267,6 +270,179 @@ fn delete_source(app: State<'_, Shared>, id: String) -> Result<(), String> {
     app.library.delete_source(&id)
 }
 
+/// Turns a frame or a source into pixel art (see pixel.rs). The result is a new frame, so it can be saved, exported for
+/// Minecraft, or sent back through the pixel tool again.
+#[tauri::command]
+async fn pixelize(app: State<'_, Shared>, frame: Option<String>, source: Option<String>, options: pixel::Options) -> Result<library::Frame, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let started = std::time::Instant::now();
+        let (path, from, ai) = match (&frame, &source) {
+            (Some(id), _) => (app.library.frame(id)?.path, id.clone(), true),
+            (None, Some(id)) => (app.library.source(id)?.path, id.clone(), false),
+            _ => return Err("Pick a frame or a source to turn into pixel art.".into()),
+        };
+        options.check()?;
+        let image = image::open(&path).map_err(|e| format!("can't read the image: {e}"))?.to_rgba8();
+        let out = pixel::run(&image, &options)?;
+        let id = format!("px{}", library::now_ms());
+        let output = app.library.frames_dir.join(format!("{id}.png"));
+        let how = if options.palette.trim().is_empty() { format!("{} colors", options.colors) } else { "your palette".to_string() };
+        let prompt = format!("Pixel art · {} × {} · {how}", out.width(), out.height());
+        let recipe = json!({
+            "prompt": prompt, "tool": "pixel", "from": from, "options": options, "ai": ai,
+            "model": "pixel", "width": out.width(), "height": out.height(), "seed": 0, "count": 1,
+        });
+        std::fs::create_dir_all(&app.library.frames_dir).map_err(|e| e.to_string())?;
+        pixel::write_png(&output, &out, &recipe, ai)?;
+        let path = output.to_string_lossy().to_string();
+        let f = library::Frame {
+            id: id.clone(), batch: id, index: 0, thumb: path.clone(), path, width: out.width(), height: out.height(),
+            seed: 0, recipe, model: "pixel".into(), variant: String::new(),
+            elapsed: started.elapsed().as_secs_f64(), saved: None, created_at: library::now_ms(),
+        };
+        app.library.add_frame(f.clone());
+        Ok(f)
+    })
+    .await
+}
+
+/// Erases areas (x, y, w, h in the frame's own pixels) from a pixel-art frame; see `pixel::erase`. A new frame, so the
+/// original is still there to go back to.
+#[tauri::command]
+async fn erase_regions(app: State<'_, Shared>, frame: String, rects: Vec<[u32; 4]>) -> Result<library::Frame, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let started = std::time::Instant::now();
+        let src = app.library.frame(&frame)?;
+        if src.recipe["tool"] != "pixel" && !src.recipe["pixel"].is_object() {
+            return Err("Erase works on pixel art. Run the pixel tool first.".into());
+        }
+        let image = image::open(&src.path).map_err(|e| format!("can't read the image: {e}"))?.to_rgba8();
+        let out = pixel::erase(&image, &rects)?;
+        let id = format!("px{}", library::now_ms());
+        let output = app.library.frames_dir.join(format!("{id}.png"));
+        let ai = src.recipe["ai"].as_bool().unwrap_or(true);
+        let recipe = json!({
+            "prompt": format!("Pixel art · {} × {} · cleaned", out.width(), out.height()), "tool": "pixel", "from": frame,
+            "erased": rects, "ai": ai, "model": "pixel", "width": out.width(), "height": out.height(), "seed": 0, "count": 1,
+        });
+        pixel::write_png(&output, &out, &recipe, ai)?;
+        let path = output.to_string_lossy().to_string();
+        let f = library::Frame {
+            id: id.clone(), batch: id, index: 0, thumb: path.clone(), path, width: out.width(), height: out.height(),
+            seed: 0, recipe, model: "pixel".into(), variant: String::new(),
+            elapsed: started.elapsed().as_secs_f64(), saved: None, created_at: library::now_ms(),
+        };
+        app.library.add_frame(f.clone());
+        Ok(f)
+    })
+    .await
+}
+
+/// Writes one frame into the Minecraft export folder (inside the save folder) as a resource-pack GUI texture.
+fn export_frame(app: &App, f: &library::Frame, export: &minecraft::Export) -> Result<String, String> {
+    export.check(f.width, f.height)?;
+    let root = PathBuf::from(&app.settings.lock().unwrap().save_dir).join("Minecraft");
+    let dst = export.png_path(&root);
+    let dir = dst.parent().ok_or("bad path")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
+    std::fs::copy(&f.path, &dst).map_err(|e| format!("can't save to {}: {e}", dst.display()))?;
+    let mut meta = dst.clone().into_os_string();
+    meta.push(".mcmeta");
+    let meta = PathBuf::from(meta);
+    match export.mcmeta(f.width, f.height) {
+        Some(json) => std::fs::write(&meta, json).map_err(|e| format!("can't save to {}: {e}", meta.display()))?,
+        // A leftover file from an earlier export would still scale the sprite the old way.
+        None => {
+            let _ = std::fs::remove_file(&meta);
+        }
+    }
+    let dst = dst.to_string_lossy().to_string();
+    app.library.mark_saved(&f.id, &dst);
+    Ok(dst)
+}
+
+#[tauri::command]
+async fn export_gui(app: State<'_, Shared>, id: String, export: minecraft::Export) -> Result<String, String> {
+    let app = app.inner().clone();
+    blocking(move || export_frame(&app, &app.library.frame(&id)?, &export)).await
+}
+
+/// Draws the GUI kit (see kit.rs): one frame per sprite and a preview, all in one batch.
+#[tauri::command]
+async fn make_kit(app: State<'_, Shared>, options: kit::Options) -> Result<Vec<library::Frame>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let started = std::time::Instant::now();
+        let (sprites, preview) = kit::build(&options)?;
+        let batch = format!("k{}", library::now_ms());
+        std::fs::create_dir_all(&app.library.frames_dir).map_err(|e| e.to_string())?;
+        let mut entries: Vec<(String, String, image::RgbaImage, Value)> = vec![(
+            format!("{batch}-preview"), "Kit preview".into(), preview, Value::Null,
+        )];
+        for s in sprites {
+            let mc = json!({ "name": s.id, "scaling": s.scaling, "border": s.border });
+            entries.push((format!("{batch}-{}", s.id), s.label.into(), s.image, mc));
+        }
+        let mut frames = Vec::new();
+        for (i, (id, label, img, mc)) in entries.into_iter().enumerate() {
+            let output = app.library.frames_dir.join(format!("{id}.png"));
+            let recipe = json!({
+                "prompt": format!("{label} · {} × {}", img.width(), img.height()), "tool": "kit", "label": label,
+                "mc": mc, "options": options, "model": "pixel", "width": img.width(), "height": img.height(), "seed": 0, "count": 1,
+            });
+            pixel::write_png(&output, &img, &recipe, false)?;
+            let path = output.to_string_lossy().to_string();
+            let f = library::Frame {
+                id, batch: batch.clone(), index: i as u32, thumb: path.clone(), path, width: img.width(), height: img.height(),
+                seed: 0, recipe, model: "pixel".into(), variant: String::new(),
+                elapsed: started.elapsed().as_secs_f64(), saved: None, created_at: library::now_ms() + i as u128,
+            };
+            app.library.add_frame(f.clone());
+            frames.push(f);
+        }
+        Ok(frames)
+    })
+    .await
+}
+
+/// The sprites of kit `batch` with where each goes. Checked all together before anything is written, so a bad name
+/// can't leave half a kit on disk.
+fn kit_jobs(frames: Vec<library::Frame>, batch: &str, modid: &str, folder: &str) -> Result<Vec<(library::Frame, minecraft::Export)>, String> {
+    let frames: Vec<_> = frames.into_iter().filter(|f| f.batch == batch && f.recipe["mc"].is_object()).collect();
+    if frames.is_empty() {
+        return Err("That kit is gone. Make it again.".into());
+    }
+    let folder = folder.trim().trim_matches('/');
+    frames
+        .into_iter()
+        .map(|f| {
+            let name = f.recipe["mc"]["name"].as_str().unwrap_or_default();
+            let b = &f.recipe["mc"]["border"];
+            let export = minecraft::Export {
+                modid: modid.trim().to_string(),
+                name: if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") },
+                kind: "sprite".into(),
+                scaling: f.recipe["mc"]["scaling"].as_str().unwrap_or("stretch").to_string(),
+                border: [0, 1, 2, 3].map(|i| b[i].as_u64().unwrap_or(0) as u32),
+            };
+            export.check(f.width, f.height).map(|_| (f, export))
+        })
+        .collect()
+}
+
+/// Saves every sprite of a kit batch under `<modid>/textures/gui/sprites/<folder>/`, each with the scaling it was drawn for.
+#[tauri::command]
+async fn export_kit(app: State<'_, Shared>, batch: String, modid: String, folder: String) -> Result<Vec<String>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let jobs = kit_jobs(app.library.frames(), &batch, &modid, &folder)?;
+        jobs.iter().map(|(f, e)| export_frame(&app, f, e)).collect()
+    })
+    .await
+}
+
 fn unique(dir: &Path, stem: &str, ext: &str) -> PathBuf {
     let mut p = dir.join(format!("{stem}.{ext}"));
     let mut n = 2;
@@ -423,6 +599,9 @@ fn remote_call(h: &AppHandle, cmd: &str, args: Value) -> Result<Value, String> {
         "paste_source" => to(block_on(paste_source(app(), arg(&args, "png")?))),
         "frame_to_source" => to(block_on(frame_to_source(app(), arg(&args, "frame")?))),
         "delete_source" => to(delete_source(app(), arg(&args, "id")?).map(|_| Value::Null)),
+        "erase_regions" => to(block_on(erase_regions(app(), arg(&args, "frame")?, arg(&args, "rects")?))),
+        "make_kit" => to(block_on(make_kit(app(), arg(&args, "options")?))),
+        "pixelize" => to(block_on(pixelize(app(), arg(&args, "frame")?, arg(&args, "source")?, arg(&args, "options")?))),
         "delete_frame" => {
             delete_frame(app(), arg(&args, "id")?);
             Ok(Value::Null)
@@ -719,7 +898,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap, save_settings, install_model, remove_model, preload, unload, generate, cancel,
-            import_sources, paste_source, frame_to_source, delete_source, save_frame, save_frame_as, delete_frame,
+            import_sources, paste_source, frame_to_source, delete_source, pixelize, erase_regions, export_gui, make_kit, export_kit, save_frame, save_frame_as, delete_frame,
             pick_folder, reveal, ui_error, check_update, install_update, open_url, models_disk, test_hf_token,
             remote_status, remote_start, remote_stop, remote_new_link, open_tailscale_page
         ])
@@ -766,6 +945,29 @@ mod tests {
         assert!(export(&src, &dir.join("c.webp")).is_err(), "no format is written under a name that isn't its own");
         assert!(!dir.join("c.webp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn kit_frame(batch: &str, name: &str, scaling: &str, w: u32) -> library::Frame {
+        library::Frame {
+            id: format!("{batch}-{name}"), batch: batch.into(), index: 0, path: String::new(), thumb: String::new(), width: w, height: w,
+            seed: 0, recipe: json!({ "tool": "kit", "mc": { "name": name, "scaling": scaling, "border": [5, 5, 5, 5] } }),
+            model: "pixel".into(), variant: String::new(), elapsed: 0.0, saved: None, created_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_kit_exports_every_sprite_under_the_folder_with_its_own_scaling() {
+        let frames = vec![kit_frame("k1", "panel", "nine_slice", 32), kit_frame("k1", "slot", "stretch", 18), kit_frame("k2", "panel", "stretch", 32)];
+        let jobs = kit_jobs(frames.clone(), "k1", " bodaddon ", "/kit/").unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].1.name, "kit/panel");
+        assert_eq!(jobs[0].1.modid, "bodaddon");
+        assert!(jobs[0].1.mcmeta(32, 32).unwrap().contains("nine_slice"));
+        assert!(jobs[1].1.mcmeta(18, 18).is_none(), "stretch needs no mcmeta");
+        assert_eq!(kit_jobs(frames.clone(), "k1", "m", "").unwrap()[0].1.name, "panel");
+        assert!(kit_jobs(frames.clone(), "k1", "Bad Id", "kit").is_err());
+        assert!(kit_jobs(frames.clone(), "k1", "m", "../up").is_err());
+        assert!(kit_jobs(frames, "gone", "m", "kit").is_err());
     }
 
     #[test]

@@ -43,6 +43,8 @@
 | **Every frame keeps its recipe** | Model, prompt, size, seed and steps go into every saved PNG. Press R to reuse a frame's recipe, seed included. |
 | **Use it from another device** | Share Latent from Settings and open the link in a browser on your laptop or phone, while this PC's GPU does the work. On your home network, or anywhere through Tailscale. Off until you start it. |
 | **At home on Linux** | Native on Wayland and X11. With [Caelestia](https://github.com/caelestia-dots/shell), Latent follows your shell's live colors; on Hyprland it drops the title bar. |
+| **GUI kit** | Draws a matching set of Minecraft GUI sprites (panel, inset, slot, three button states, progress bar) pixel by pixel, in five looks or your own colors. Five-tone ramps lit from the top left, cut corners, dark-tone outlines. Save the whole kit into your mod's resource folders in one click. |
+| **Pixel art and Minecraft textures** | Turn any frame or picture into real pixel art: snapped to a grid, limited to a palette (yours or found in the image), lone pixels cleaned up. Drag boxes over baked-in text, swatches or arrows to erase them and leave a clean background. Then save it as a Minecraft GUI sprite with the nine-slice `.png.mcmeta` written for you. Runs on the CPU. |
 | **Tools** *(coming soon)* | Upscale 2x or 4x and remove backgrounds on any frame or photo, on your own hardware. |
 
 ## Install
