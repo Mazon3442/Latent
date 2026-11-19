@@ -100,7 +100,10 @@ impl Library {
         };
         let id = format!("s{}", now_ms());
         let path = self.sources_dir.join(format!("{id}.png"));
-        image.to_rgb8().save(&path).map_err(|e| format!("can't store the source: {e}"))?;
+        // See-through pictures (cut-out art, pixel art with a clear background) keep their transparency; the models flatten
+        // sources themselves when they read them.
+        if image.color().has_alpha() { image.to_rgba8().save(&path) } else { image.to_rgb8().save(&path) }
+            .map_err(|e| format!("can't store the source: {e}"))?;
         let source = Source {
             id,
             path: path.to_string_lossy().to_string(),
@@ -165,5 +168,32 @@ impl Library {
     pub fn clear_frames(&self) {
         self.frames.lock().unwrap().clear();
         let _ = std::fs::remove_dir_all(&self.frames_dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ImageFormat, Rgba, RgbaImage};
+
+    #[test]
+    fn sources_keep_their_transparency() {
+        let dir = std::env::temp_dir().join(format!("latent-library-test-{}", std::process::id()));
+        let lib = Library::open(&dir, dir.join("frames")).unwrap();
+        let mut img = RgbaImage::from_pixel(8, 8, Rgba([10, 20, 30, 255]));
+        img.put_pixel(0, 0, Rgba([0, 0, 0, 0]));
+        let mut bytes = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png).unwrap();
+        let source = lib.paste(&bytes).unwrap();
+        let back = image::open(&source.path).unwrap().to_rgba8();
+        assert_eq!(back.get_pixel(0, 0)[3], 0, "the clear corner stays clear");
+        assert_eq!(back.get_pixel(4, 4).0, [10, 20, 30, 255]);
+        // A picture with no transparency is still stored without an alpha channel.
+        let rgb = image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3]));
+        let mut jpg = Vec::new();
+        rgb.write_to(&mut std::io::Cursor::new(&mut jpg), ImageFormat::Jpeg).unwrap();
+        let photo = lib.paste(&jpg).unwrap();
+        assert!(!image::open(&photo.path).unwrap().color().has_alpha());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
