@@ -1366,6 +1366,8 @@ document.addEventListener("click", async e => {
   if (!t || t.closest("#menu")) return;
   if (t.dataset.delete) {
     e.stopPropagation();
+    const src = state.sources.find(s => s.id === t.dataset.delete);
+    if (!confirm(`Remove ${src?.name ?? "this photo"} from Sources? Frames already made from it stay.`)) return;
     await invoke("delete_source", { id: t.dataset.delete }).catch(err => log(String(err), "err"));
     state.sources = state.sources.filter(s => s.id !== t.dataset.delete);
     state.attached = state.attached.filter(id => id !== t.dataset.delete);

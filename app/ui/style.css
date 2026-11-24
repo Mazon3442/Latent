@@ -149,9 +149,9 @@ kbd { font: 500 11px/1 var(--ui); padding: 3px 5px; border-radius: var(--r-sm); 
 .source img { width: 48px; height: 48px; object-fit: cover; border-radius: var(--r-sm); background: var(--checker); }
 .source .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .source .dims { color: var(--ink-3); font-size: 12px; }
-.source .x { opacity: 0; color: var(--ink-3); padding: 4px 6px; border-radius: var(--r-sm); }
+.source .x { opacity: 0.6; color: var(--ink-3); padding: 8px 10px; border-radius: var(--r-sm); }
 .source[aria-pressed="true"] { background: var(--surface-3); box-shadow: inset 0 0 0 1.5px var(--live); }
-@media (hover: hover) and (pointer: fine) { .source:hover { background: var(--surface-2); } .source:hover .x { opacity: 1; } .source[aria-pressed="true"]:hover { background: var(--surface-3); } .source .x:hover { color: var(--ink); } }
+@media (hover: hover) and (pointer: fine) { .source:hover { background: var(--surface-2); } .source:hover .x { opacity: 1; } .source[aria-pressed="true"]:hover { background: var(--surface-3); } .source .x:hover { color: var(--danger, var(--ink)); } }
 
 /* ---------- canvas: one frame, large; it develops here ---------- */
 .col-center { padding: 18px 28px 22px; gap: 12px; }
